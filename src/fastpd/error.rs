@@ -31,3 +31,34 @@ pub enum TreeExtractionError {
     #[error("Node {0} has both leaf and internal node properties")]
     MixedNodeType(usize),
 }
+
+/// Errors that can occur during FastPD computation.
+#[derive(Debug, Error)]
+pub enum FastPDError {
+    #[error("Invalid tree structure: {0}")]
+    InvalidTree(String),
+
+    #[error("Feature index {0} out of bounds (max: {1})")]
+    InvalidFeature(usize, usize),
+
+    #[error("Array shape mismatch: expected {expected:?}, got {actual:?}")]
+    ShapeMismatch {
+        expected: Vec<usize>,
+        actual: Vec<usize>,
+    },
+
+    #[error("Missing observation set for feature subset")]
+    MissingObservationSet,
+
+    #[error("Background samples must have at least one row")]
+    EmptyBackground,
+
+    #[error("Evaluation point dimension {0} does not match tree features {1}")]
+    DimensionMismatch(usize, usize),
+
+    #[error("No leaves found in tree")]
+    NoLeaves,
+
+    #[error("Internal error: {0}")]
+    Internal(String),
+}
