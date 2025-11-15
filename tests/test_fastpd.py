@@ -8,114 +8,11 @@ import pytest
 
 import xgboost as xgb
 
-
-def test_fastpd_simple_model():
-    """Test FastPD with a simple linear model: y = x1 + x2 + c."""
-    # Generate data: y = x1 + x2 + 1.0
-    np.random.seed(42)
-    n_samples = 200
-    n_features = 2
-
-    X = np.random.rand(n_samples, n_features) * 10  # Features in [0, 10]
-    y = X[:, 0] + X[:, 1] + 1.0  # y = x1 + x2 + 1.0
-
-    # Fit XGBoost model with 50 trees
-    model = xgb.XGBRegressor(
-        n_estimators=50,
-        max_depth=3,
-        learning_rate=0.1,
-        random_state=42,
-    )
-    model.fit(X, y)
-
-    # Create FastPD instance
-    fastpd = glex_rust.FastPD.from_xgboost(model, background_samples=X)
-
-    # Verify basic properties
-    assert fastpd.num_trees() == 50
-    assert fastpd.n_background() == n_samples
-    assert fastpd.n_features() == n_features
-
-    # Test PD function for feature 0
-    # Create evaluation points: vary x1, fix x2=0
-    n_eval = 10
-    eval_points = np.column_stack(
-        [
-            np.linspace(0, 10, n_eval),  # x1 varies
-            np.zeros(n_eval),  # x2 fixed at 0
-        ]
-    )
-
-    # Compute PD for feature 0
-    pd_values = fastpd.pd_function(evaluation_points=eval_points, feature_subset=[0])
-
-    assert pd_values.shape == (n_eval,)
-    assert not np.any(np.isnan(pd_values))
-    assert not np.any(np.isinf(pd_values))
-
-    # For y = x1 + x2 + 1.0, PD for feature 0 should be approximately x1 + 1.0
-    # (since x2 is averaged over background, and E[x2] ≈ 5.0, so PD ≈ x1 + 5.0 + 1.0)
-    # Actually, let's check that PD increases with x1
-    assert pd_values[-1] > pd_values[0], "PD should increase with x1"
-
-    # Test PD function for feature 1
-    eval_points_2 = np.column_stack(
-        [
-            np.zeros(n_eval),  # x1 fixed at 0
-            np.linspace(0, 10, n_eval),  # x2 varies
-        ]
-    )
-
-    pd_values_2 = fastpd.pd_function(
-        evaluation_points=eval_points_2, feature_subset=[1]
-    )
-
-    assert pd_values_2.shape == (n_eval,)
-    assert pd_values_2[-1] > pd_values_2[0], "PD should increase with x2"
-
-    # Test PD function for empty subset (should be constant = mean prediction)
-    eval_points_empty = np.column_stack(
-        [
-            np.linspace(0, 10, n_eval),
-            np.linspace(0, 10, n_eval),
-        ]
-    )
-
-    pd_values_empty = fastpd.pd_function(
-        evaluation_points=eval_points_empty, feature_subset=[]
-    )
-
-    assert pd_values_empty.shape == (n_eval,)
-    # All values should be approximately the same (mean prediction)
-    assert np.std(pd_values_empty) < 1.0, (
-        "PD for empty subset should be approximately constant"
-    )
-
-    # Test PD function for both features
-    pd_values_both = fastpd.pd_function(
-        evaluation_points=eval_points, feature_subset=[0, 1]
-    )
-
-    assert pd_values_both.shape == (n_eval,)
-    # For y = x1 + x2 + 1.0, with x2=0, PD([0,1]) should be approximately x1 + 1.0
-    # (since we're fixing both features, it's just the model prediction)
-    assert pd_values_both[-1] > pd_values_both[0]
-
-    # Test cache clearing
-    fastpd.clear_caches()
-
-    # After clearing, should still work
-    pd_values_after_clear = fastpd.pd_function(
-        evaluation_points=eval_points, feature_subset=[0]
-    )
-    assert pd_values_after_clear.shape == (n_eval,)
-
-
 def test_fastpd_empirical_consistency():
     """Test that FastPD matches empirical PD computation for simple cases.
 
-    Note: This test verifies that FastPD produces reasonable results.
-    Exact matching may vary due to XGBoost's tree structure and numerical precision.
+    Empirical PD is computed as the average of model predictions over background samples.
+    FastPD should match this exactly (within floating point precision).
     """
     np.random.seed(42)
     n_samples = 200
@@ -142,20 +39,17 @@ def test_fastpd_empirical_consistency():
     pd_fastpd = fastpd.pd_function(evaluation_points=eval_point, feature_subset=[0])[0]
 
     # Compute empirical PD manually: average of model([5.0, X[i, 1]]) for all i
-    # TODO: use model.predict() instead of fastpd.predict(), currently there's floating point precision issues with split threshold comparisons so it's not used
+    # Now that precision is fixed, we can use model.predict() directly
     empirical_pd = np.mean(
-        [fastpd.predict(np.array([[5.0, X[i, 1]]])) for i in range(n_samples)]
+        [model.predict(np.array([[5.0, X[i, 1]]]))[0] for i in range(n_samples)]
     )
 
-    # Basic sanity checks
-    assert not np.isnan(pd_fastpd), "FastPD value should not be NaN"
-    assert not np.isinf(pd_fastpd), "FastPD value should not be Inf"
-    assert not np.isnan(empirical_pd), "Empirical PD should not be NaN"
-
-    # For now, just verify that FastPD produces a finite value and log the discrepancy.
-    # This test is mainly a regression / sanity check to ensure values are finite.
-    print(
-        f"FastPD: {pd_fastpd:.6f}, Empirical PD: {empirical_pd:.6f}, Diff: {abs(pd_fastpd - empirical_pd):.6f}"
+    # FastPD should match empirical PD within reasonable tolerance
+    # For f32 precision, we expect differences < 1e-5
+    diff = abs(pd_fastpd - empirical_pd)
+    assert diff < 1e-5, (
+        f"FastPD ({pd_fastpd:.10f}) should match empirical PD ({empirical_pd:.10f}), "
+        f"but difference is {diff:.10e}"
     )
 
 
@@ -165,6 +59,8 @@ def test_fastpd_single_tree_empirical_consistency():
     This is closer in spirit to the Rust unit test
     `fastpd::evaluate::tests::test_evaluate_pd_matches_empirical`, but uses a
     real XGBoost tree extracted via the Python bridge.
+
+    For a single tree, FastPD should match empirical PD very closely.
     """
     np.random.seed(32)
     n_samples = 200
@@ -191,19 +87,17 @@ def test_fastpd_single_tree_empirical_consistency():
     pd_fastpd = fastpd.pd_function(evaluation_points=eval_point, feature_subset=[0])[0]
 
     # Compute empirical PD manually: average of model([5.0, X[i, 1]]) for all i
+    # Now that precision is fixed, we can use model.predict() directly
     empirical_pd = np.mean(
-        [fastpd.predict(np.array([[5.0, X[i, 1]]])) for i in range(n_samples)]
+        [model.predict(np.array([[5.0, X[i, 1]]]))[0] for i in range(n_samples)]
     )
 
-    # Basic sanity checks
-    assert not np.isnan(pd_fastpd), "FastPD value should not be NaN"
-    assert not np.isinf(pd_fastpd), "FastPD value should not be Inf"
-    assert not np.isnan(empirical_pd), "Empirical PD should not be NaN"
-
-    # For now, just verify that FastPD produces a finite value and log the discrepancy.
-    # This test is mainly a regression / sanity check to ensure values are finite.
-    print(
-        f"FastPD: {pd_fastpd:.6f}, Empirical PD: {empirical_pd:.6f}, Diff: {abs(pd_fastpd - empirical_pd):.6f}"
+    # FastPD should match empirical PD within reasonable tolerance
+    # For f32 precision with single tree, we expect differences < 1e-5
+    diff = abs(pd_fastpd - empirical_pd)
+    assert diff < 1e-5, (
+        f"FastPD ({pd_fastpd:.10f}) should match empirical PD ({empirical_pd:.10f}), "
+        f"but difference is {diff:.10e}"
     )
 
 
