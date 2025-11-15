@@ -1,5 +1,7 @@
 # glex-rust
 
+![CI](https://github.com/jyliuu/glex-rust/actions/workflows/ci.yml/badge.svg)
+
 A high-performance Rust implementation of the FastPD algorithm from Liu et al. (2025) for estimating Partial Dependence (PD) functions from tree-based models, with Python bindings.
 
 ## Overview
