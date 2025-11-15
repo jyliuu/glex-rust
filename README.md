@@ -17,7 +17,7 @@ A high-performance Rust implementation of the FastPD algorithm from Liu et al. (
 ### Prerequisites
 
 - Rust toolchain (install from [rustup.rs](https://rustup.rs/))
-- Python 3.8 or higher
+- Python 3.12 or higher
 - pip (maturin will be installed automatically as a build dependency when using `pip install`)
 
 ### Building from Source
