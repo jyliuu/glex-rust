@@ -14,6 +14,7 @@ use crate::fastpd::types::FeatureSubset;
 ///
 /// Different feature subsets S may map to the same U = S ∩ (union of T_j),
 /// so caching at the U level allows reuse across different S queries.
+#[derive(Debug)]
 pub struct PDCache {
     cache: HashMap<(u64, FeatureSubset), f64>,
 }
