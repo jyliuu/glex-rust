@@ -24,7 +24,7 @@ A high-performance Rust implementation of the FastPD algorithm from Liu et al. (
 
 1. Clone the repository:
 ```bash
-git clone <repository-url>
+git clone git@github.com:jyliuu/glex-rust.git
 cd glex-rust
 ```
 
@@ -85,11 +85,7 @@ fastpd = glex_rust.FastPD.from_xgboost(model, background_samples=X)
 
 # Compute PD function for feature 0
 n_eval = 10
-eval_points = np.column_stack([
-    np.linspace(0, 10, n_eval),  # Feature 0 varies
-    np.zeros(n_eval),             # Feature 1 fixed at 0
-])
-
+eval_points = np.random.rand(n_eval, 2) * 10  # Random features x1 and x2 in [0, 10)
 pd_values = fastpd.pd_function(
     evaluation_points=eval_points,
     feature_subset=[0]
