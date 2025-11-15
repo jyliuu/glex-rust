@@ -1,14 +1,14 @@
 pub mod json_schema;
 pub mod parser;
+pub mod python_bridge;
 pub mod tree_model;
 pub mod types;
-pub mod python_bridge;
 
 use pyo3::prelude::*;
 use pyo3::Bound;
 
 use crate::xgboost::parser::parse_json_tree;
-use crate::xgboost::python_bridge::{get_booster_json_dumps, get_booster_base_score};
+use crate::xgboost::python_bridge::{get_booster_base_score, get_booster_json_dumps};
 use crate::xgboost::types::XGBoostTreeModel;
 
 /// Extracts all trees and base_score from an XGBoost model.
@@ -29,7 +29,7 @@ use crate::xgboost::types::XGBoostTreeModel;
 /// - Tree structure validation fails.
 pub fn extract_trees_from_xgboost(
     model: &Bound<'_, PyAny>,
-) -> PyResult<(Vec<XGBoostTreeModel>, f64)> {
+) -> PyResult<(Vec<XGBoostTreeModel>, f32)> {
     let dumps = get_booster_json_dumps(model)?;
     let base_score = get_booster_base_score(model)?;
     let mut trees = Vec::with_capacity(dumps.len());

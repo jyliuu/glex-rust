@@ -1,0 +1,25 @@
+# Changelog
+
+All notable changes to this project will be documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [0.1.1] - 2025-01-27
+
+### Fixed
+- Fixed precision discrepancies between FastPD and XGBoost predictions by using `f32` internally to match XGBoost's internal precision
+- Python API now accepts `float64` numpy arrays and automatically converts them to `float32` internally, eliminating the need for manual type conversion
+
+### Changed
+- Internal precision changed from `f64` to `f32` throughout the codebase to match XGBoost's internal representation
+- All threshold and leaf value types now use `f32` for exact precision matching with XGBoost
+
+## [0.1.0] - 2025-01-27
+
+### Added
+- Initial release
+- FastPD implementation for efficient partial dependence computation
+- XGBoost tree extraction and parsing
+- Python bindings for FastPD functionality
+- Support for tree-based model prediction and PD function evaluation

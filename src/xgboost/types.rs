@@ -24,7 +24,7 @@ impl XGBoostTreeModel {
             let feature = node.feature.unwrap_or(0);
             let threshold = node.threshold.unwrap_or(0.0);
             output.push_str(&format!(
-                "{}Feature {} <= {:.6}\n",
+                "{}Feature {} < {:.6}\n",
                 indent, feature, threshold
             ));
 

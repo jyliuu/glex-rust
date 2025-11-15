@@ -63,7 +63,7 @@ pub fn get_booster_json_dumps(model: &Bound<'_, PyAny>) -> PyResult<Vec<String>>
 ///
 /// # Errors
 /// Returns `PyErr` if the model is not an XGBoost model/Booster.
-pub fn get_booster_base_score(model: &Bound<'_, PyAny>) -> PyResult<f64> {
+pub fn get_booster_base_score(model: &Bound<'_, PyAny>) -> PyResult<f32> {
     // Try to get booster from model (XGBClassifier/XGBRegressor have get_booster()).
     let booster = if model.hasattr("get_booster")? {
         model.call_method0("get_booster")?
@@ -102,7 +102,7 @@ pub fn get_booster_base_score(model: &Bound<'_, PyAny>) -> PyResult<f64> {
     if let Some(score_str) = base_score_str {
         // Parse the string (e.g., "[1.0883814E1]" -> 10.883814)
         let cleaned = score_str.trim_matches(|c| c == '[' || c == ']');
-        cleaned.parse::<f64>().map_err(|e| {
+        cleaned.parse::<f32>().map_err(|e| {
             PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
                 "Failed to parse base_score '{}': {}",
                 cleaned, e

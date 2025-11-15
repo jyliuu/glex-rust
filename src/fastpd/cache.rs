@@ -16,7 +16,7 @@ use crate::fastpd::types::FeatureSubset;
 /// so caching at the U level allows reuse across different S queries.
 #[derive(Debug)]
 pub struct PDCache {
-    cache: HashMap<(u64, FeatureSubset), f64>,
+    cache: HashMap<(u64, FeatureSubset), f32>,
 }
 
 impl PDCache {
@@ -35,7 +35,7 @@ impl PDCache {
     ///
     /// # Returns
     /// The cached value if found, `None` otherwise.
-    pub fn get(&self, point: &ArrayView1<f64>, subset: &FeatureSubset) -> Option<f64> {
+    pub fn get(&self, point: &ArrayView1<f32>, subset: &FeatureSubset) -> Option<f32> {
         let hash = Self::hash_point(point);
         self.cache.get(&(hash, subset.clone())).copied()
     }
@@ -46,7 +46,7 @@ impl PDCache {
     /// * `point` - The evaluation point
     /// * `subset` - The feature subset (S or U)
     /// * `value` - The computed PD value
-    pub fn insert(&mut self, point: &ArrayView1<f64>, subset: FeatureSubset, value: f64) {
+    pub fn insert(&mut self, point: &ArrayView1<f32>, subset: FeatureSubset, value: f32) {
         let hash = Self::hash_point(point);
         self.cache.insert((hash, subset), value);
     }
@@ -70,7 +70,7 @@ impl PDCache {
     ///
     /// This uses a simple hash of the point's coordinates. For better performance
     /// with many cache lookups, consider using `fxhash` or similar.
-    fn hash_point(point: &ArrayView1<f64>) -> u64 {
+    fn hash_point(point: &ArrayView1<f32>) -> u64 {
         use std::collections::hash_map::DefaultHasher;
         let mut hasher = DefaultHasher::new();
         for &x in point.iter() {
