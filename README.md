@@ -22,6 +22,11 @@ A high-performance Rust implementation of the FastPD algorithm from Liu et al. (
 - Rust toolchain (install from [rustup.rs](https://rustup.rs/))
 - Python 3.12 or higher
 - pip (maturin will be installed automatically as a build dependency when using `pip install`)
+### Quick Install
+
+```bash
+pip install git+https://github.com/jyliuu/glex-rust.git
+```
 
 ### Building from Source
 
