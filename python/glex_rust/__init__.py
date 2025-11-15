@@ -7,6 +7,6 @@ named `glex_rust`, the compiled extension is installed as the submodule
 package level so callers can simply `import glex_rust` and use them.
 """
 
-from .glex_rust import get_projection_beta, extract_trees_from_xgboost
+from .glex_rust import extract_trees_from_xgboost
 
-__all__ = ["get_projection_beta", "extract_trees_from_xgboost"]
+__all__ = ["extract_trees_from_xgboost"]
