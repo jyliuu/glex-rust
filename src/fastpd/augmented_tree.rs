@@ -17,6 +17,7 @@ use crate::fastpd::types::{PathData, PathFeatures};
 /// The tree itself can be owned or borrowed - `Arc` is not necessary for the tree structure.
 /// `Arc` is only used for `ObservationSet` sharing within `PathData` to avoid cloning
 /// large vectors during augmentation.
+#[derive(Debug)]
 pub struct AugmentedTree<T: TreeModel> {
     /// The original tree model.
     pub tree: T,

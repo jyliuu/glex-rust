@@ -324,7 +324,7 @@ mod tests {
             // Create synthetic sample: [x_0, X^{(i)}_1]
             let synthetic = [evaluation_point[0], background[[i, 1]]];
             // Traverse tree to get prediction
-            let prediction = predict_tree(&tree, &synthetic);
+            let prediction = tree.predict(&synthetic);
             empirical_sum += prediction;
         }
         let empirical_value = empirical_sum / n_b as f64;
@@ -350,7 +350,7 @@ mod tests {
         for i in 0..n_b {
             // For S = {}, we use the full background sample
             let synthetic = [background[[i, 0]], background[[i, 1]]];
-            let prediction = predict_tree(&tree, &synthetic);
+            let prediction = tree.predict(&synthetic);
             empirical_sum2 += prediction;
         }
         let empirical_value2 = empirical_sum2 / n_b as f64;
@@ -361,22 +361,5 @@ mod tests {
             fastpd_value2,
             empirical_value2
         );
-    }
-
-    // Helper function to predict using a tree (for computing empirical PD)
-    fn predict_tree(tree: &Tree, x: &[f64]) -> f64 {
-        let mut node_id = tree.root();
-        loop {
-            if tree.is_leaf(node_id) {
-                return tree.leaf_value(node_id).unwrap();
-            }
-            let feature = tree.node_feature(node_id).unwrap();
-            let threshold = tree.node_threshold(node_id).unwrap();
-            if x[feature] <= threshold {
-                node_id = tree.left_child(node_id).unwrap();
-            } else {
-                node_id = tree.right_child(node_id).unwrap();
-            }
-        }
     }
 }
