@@ -134,22 +134,17 @@ fn augment_recursive<T: TreeModel>(
             path_data_yes.insert(subset_s.clone(), Arc::clone(shared_obs_set));
             path_data_no.insert(subset_s.clone(), Arc::clone(shared_obs_set));
         } else {
-            // d_j ∉ S: filter D_S based on threshold
+            // d_j ∉ S: split D_S based on threshold in a single pass
             // This creates NEW observation sets (filtered subsets)
-            let filtered_yes = Arc::new(shared_obs_set.as_ref().filter_by_threshold(
+            // Use const generic with T::COMPARISON for compile-time monomorphism
+            let (filtered_yes, filtered_no) = shared_obs_set.as_ref().split_by_threshold(
                 background_samples,
                 feature,
                 threshold,
-                true,
-            ));
-            let filtered_no = Arc::new(shared_obs_set.as_ref().filter_by_threshold(
-                background_samples,
-                feature,
-                threshold,
-                false,
-            ));
-            path_data_yes.insert(subset_s.clone(), filtered_yes);
-            path_data_no.insert(subset_s.clone(), filtered_no);
+                T::COMPARISON,
+            );
+            path_data_yes.insert(subset_s.clone(), Arc::new(filtered_yes));
+            path_data_no.insert(subset_s.clone(), Arc::new(filtered_no));
         }
     }
 

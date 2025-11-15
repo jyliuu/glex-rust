@@ -1,14 +1,14 @@
 pub mod json_schema;
 pub mod parser;
+pub mod python_bridge;
 pub mod tree_model;
 pub mod types;
-pub mod python_bridge;
 
 use pyo3::prelude::*;
 use pyo3::Bound;
 
 use crate::xgboost::parser::parse_json_tree;
-use crate::xgboost::python_bridge::{get_booster_json_dumps, get_booster_base_score};
+use crate::xgboost::python_bridge::{get_booster_base_score, get_booster_json_dumps};
 use crate::xgboost::types::XGBoostTreeModel;
 
 /// Extracts all trees and base_score from an XGBoost model.

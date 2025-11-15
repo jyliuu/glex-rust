@@ -15,9 +15,11 @@ pub struct TreeNode {
     pub feature: Option<usize>,
     /// Threshold value for splitting (None for leaves).
     pub threshold: Option<f64>,
-    /// Left child index (for x <= threshold, or "yes" branch).
+    /// Left child index (for "yes" branch).
+    /// The comparison semantics (strict < vs weak <=) are determined by the TreeModel implementation.
     pub left: Option<usize>,
-    /// Right child index (for x > threshold, or "no" branch).
+    /// Right child index (for "no" branch).
+    /// The comparison semantics (strict >= vs weak >) are determined by the TreeModel implementation.
     pub right: Option<usize>,
     /// Missing value routing: where to send samples with missing feature value.
     /// If None, missing values follow the default (usually left/right based on model).
@@ -155,6 +157,13 @@ impl Tree {
 /// expose this directly. Instead, implementations should route missing values according
 /// to their model's semantics when traversing (e.g., XGBoost uses a `missing` field).
 pub trait TreeModel: Send + Sync {
+    /// Comparison operator mode: true for strict (<), false for weak (<=)
+    ///
+    /// This determines how the tree splits at thresholds:
+    /// - `true` (strict): `feature_value < threshold` goes to left child (XGBoost behavior)
+    /// - `false` (weak): `feature_value <= threshold` goes to left child
+    const COMPARISON: bool;
+
     /// Returns the feature index used for splitting at this node, or `None` if leaf.
     fn node_feature(&self, node_id: usize) -> Option<FeatureIndex>;
 
@@ -162,11 +171,13 @@ pub trait TreeModel: Send + Sync {
     fn node_threshold(&self, node_id: usize) -> Option<Threshold>;
 
     /// Returns the left child node ID, or `None` if leaf or invalid.
-    /// For splits `x <= threshold`, this is the "yes" branch.
+    /// For strict comparison (<), this is the "yes" branch when `feature_value < threshold`.
+    /// For weak comparison (<=), this is the "yes" branch when `feature_value <= threshold`.
     fn left_child(&self, node_id: usize) -> Option<usize>;
 
     /// Returns the right child node ID, or `None` if leaf or invalid.
-    /// For splits `x > threshold`, this is the "no" branch.
+    /// For strict comparison (<), this is the "no" branch when `feature_value >= threshold`.
+    /// For weak comparison (<=), this is the "no" branch when `feature_value > threshold`.
     fn right_child(&self, node_id: usize) -> Option<usize>;
 
     /// Returns `true` if the node is a leaf (has a leaf value).
@@ -182,6 +193,10 @@ pub trait TreeModel: Send + Sync {
     fn num_nodes(&self) -> usize;
 
     /// Predicts the output for a given input point by traversing the tree.
+    ///
+    /// Uses the comparison semantics defined by `Self::COMPARISON`:
+    /// - If `COMPARISON = true`: `feature_value < threshold` goes left
+    /// - If `COMPARISON = false`: `feature_value <= threshold` goes left
     ///
     /// # Arguments
     /// * `x` - Input point (slice of feature values)
@@ -200,24 +215,14 @@ pub trait TreeModel: Send + Sync {
             let feature = self.node_feature(node_id).unwrap();
             let threshold = self.node_threshold(node_id).unwrap();
             let feature_value = x[feature];
-            
-            // Standard comparison: x <= threshold goes to left child (yes branch)
-            // 
-            // Note on floating-point precision: XGBoost (C++) and Rust both use IEEE 754
-            // f64, but may have tiny differences in floating-point representation or
-            // comparison due to:
-            // 1. Different compiler optimizations (e.g., C++ may use extended precision)
-            // 2. Different floating-point instruction sets (SSE2 vs x87)
-            // 3. Different rounding in intermediate calculations
-            //
-            // When values are exactly at or very close to thresholds, these differences
-            // can cause different branches to be taken, leading to different predictions.
-            // This is expected behavior and the resulting discrepancies are typically
-            // small (e.g., ~0.02 average difference in PD values).
-            //
-            // We use exact comparison (<=) to match XGBoost's semantics as closely as
-            // possible. The small discrepancies at boundaries are acceptable and expected.
-            if feature_value <= threshold {
+
+            let go_left = if Self::COMPARISON {
+                feature_value < threshold
+            } else {
+                feature_value <= threshold
+            };
+
+            if go_left {
                 node_id = self.left_child(node_id).unwrap();
             } else {
                 node_id = self.right_child(node_id).unwrap();
@@ -227,7 +232,9 @@ pub trait TreeModel: Send + Sync {
 }
 
 /// Implement TreeModel for Tree directly - this is the unified representation.
+/// Uses strict comparison (<) to match XGBoost behavior.
 impl TreeModel for Tree {
+    const COMPARISON: bool = true; // XGBoost-style behavior
     fn node_feature(&self, node_id: usize) -> Option<FeatureIndex> {
         self.nodes.get(node_id)?.feature
     }

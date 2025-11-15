@@ -130,43 +130,48 @@ impl ObservationSet {
             ObservationSet::Indices(v) => v,
         }
     }
-
-    /// Filters observations by threshold, creating a new observation set.
-    ///
-    /// This is the only operation that creates new data (not shared via Arc).
+    /// Splits observations by threshold into two sets in a single pass.
     ///
     /// # Arguments
     /// * `data` - Background data array (n_samples, n_features)
     /// * `feature` - Feature index to filter on
     /// * `threshold` - Threshold value
-    /// * `less_than` - If true, keep samples where value <= threshold; otherwise keep where value > threshold
+    /// * `strict` - If true, use strict comparison (< for left, >= for right); if false, use weak comparison (<= for left, > for right)
     ///
     /// # Returns
-    /// A new `ObservationSet` containing only the filtered indices.
-    pub fn filter_by_threshold(
+    /// A tuple `(left_set, right_set)` where:
+    /// - `left_set` contains indices where the feature value satisfies the left child condition
+    /// - `right_set` contains indices where the feature value satisfies the right child condition
+    pub fn split_by_threshold(
         &self,
         data: &ArrayView2<f64>,
         feature: FeatureIndex,
         threshold: Threshold,
-        less_than: bool,
-    ) -> Self {
-        let mut out = Vec::new();
+        strict: bool,
+    ) -> (Self, Self) {
+        let mut left = Vec::new();
+        let mut right = Vec::new();
         match self {
             ObservationSet::Indices(indices) => {
                 for &idx in indices {
                     let val = data[[idx, feature]];
-                    let keep = if less_than {
-                        val <= threshold
+                    let go_left = if strict {
+                        val < threshold
                     } else {
-                        val > threshold
+                        val <= threshold
                     };
-                    if keep {
-                        out.push(idx);
+                    if go_left {
+                        left.push(idx);
+                    } else {
+                        right.push(idx);
                     }
                 }
             }
         }
-        ObservationSet::Indices(out)
+        (
+            ObservationSet::Indices(left),
+            ObservationSet::Indices(right),
+        )
     }
 }
 
@@ -249,15 +254,11 @@ mod tests {
         // Start with all indices
         let obs_set = ObservationSet::all(3);
 
-        // Filter feature 0 <= 3.0 (should keep indices 0 and 1)
-        let filtered = obs_set.filter_by_threshold(&data_view, 0, 3.0, true);
-        assert_eq!(filtered.len(), 2);
-        assert_eq!(filtered.as_indices(), &[0, 1]);
-
-        // Filter feature 0 > 3.0 (should keep index 2)
-        let filtered = obs_set.filter_by_threshold(&data_view, 0, 3.0, false);
-        assert_eq!(filtered.len(), 1);
-        assert_eq!(filtered.as_indices(), &[2]);
+        let (filtered_yes, filtered_no) = obs_set.split_by_threshold(&data_view, 0, 3.0, true);
+        assert_eq!(filtered_yes.len(), 1);
+        assert_eq!(filtered_yes.as_indices(), &[0]);
+        assert_eq!(filtered_no.len(), 2);
+        assert_eq!(filtered_no.as_indices(), &[1, 2]);
     }
 
     #[test]

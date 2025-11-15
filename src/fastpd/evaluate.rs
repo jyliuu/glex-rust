@@ -137,7 +137,12 @@ fn evaluate_recursive<T: TreeModel>(
     if feature_subset.contains(feature) {
         // d_j ∈ U: follow path based on x[d_j]
         let feature_value = point[feature];
-        if feature_value <= threshold {
+        let go_left = if T::COMPARISON {
+            feature_value < threshold
+        } else {
+            feature_value <= threshold
+        };
+        if go_left {
             evaluate_recursive(tree, left_child, point, feature_subset, augmented_tree)
         } else {
             evaluate_recursive(tree, right_child, point, feature_subset, augmented_tree)
