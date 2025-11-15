@@ -142,6 +142,7 @@ def test_fastpd_empirical_consistency():
     pd_fastpd = fastpd.pd_function(evaluation_points=eval_point, feature_subset=[0])[0]
 
     # Compute empirical PD manually: average of model([5.0, X[i, 1]]) for all i
+    # TODO: use model.predict() instead of fastpd.predict(), currently there's floating point precision issues with split threshold comparisons so it's not used
     empirical_pd = np.mean(
         [fastpd.predict(np.array([[5.0, X[i, 1]]])) for i in range(n_samples)]
     )
