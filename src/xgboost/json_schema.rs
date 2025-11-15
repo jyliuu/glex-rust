@@ -28,7 +28,7 @@ pub struct JsonNode {
     pub split: Option<String>,
     /// Threshold value for the split (None for leaves).
     #[serde(default)]
-    pub split_condition: Option<f64>,
+    pub split_condition: Option<f32>,
     /// Node ID of "yes" child (x <= threshold) - deprecated in favor of children array.
     #[serde(default)]
     pub yes: Option<u32>,
@@ -45,5 +45,5 @@ pub struct JsonNode {
     // Leaf node fields
     /// Leaf value (None for internal nodes).
     #[serde(default)]
-    pub leaf: Option<f64>,
+    pub leaf: Option<f32>,
 }

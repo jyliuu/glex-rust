@@ -29,7 +29,7 @@ use crate::xgboost::types::XGBoostTreeModel;
 /// - Tree structure validation fails.
 pub fn extract_trees_from_xgboost(
     model: &Bound<'_, PyAny>,
-) -> PyResult<(Vec<XGBoostTreeModel>, f64)> {
+) -> PyResult<(Vec<XGBoostTreeModel>, f32)> {
     let dumps = get_booster_json_dumps(model)?;
     let base_score = get_booster_base_score(model)?;
     let mut trees = Vec::with_capacity(dumps.len());

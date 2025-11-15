@@ -52,11 +52,12 @@ impl FastPDPy {
         // Extract trees and base_score from XGBoost model
         let (trees, base_score) = extract_trees_from_xgboost(&model)?;
 
-        // Convert to background samples view
-        let background_view = background_samples.as_array();
+        // Convert f64 array to f32 array
+        let background_f64 = background_samples.as_array();
+        let background_f32: ndarray::Array2<f32> = background_f64.mapv(|x| x as f32);
 
         // Create FastPD instance with intercept
-        let fastpd = FastPD::new(trees, &background_view, base_score).map_err(|e| {
+        let fastpd = FastPD::new(trees, &background_f32.view(), base_score).map_err(|e| {
             PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("FastPD error: {}", e))
         })?;
 
@@ -78,11 +79,14 @@ impl FastPDPy {
         py: Python<'a>,
         evaluation_points: PyReadonlyArray2<f64>,
         feature_subset: Vec<usize>,
-    ) -> PyResult<Bound<'a, PyArray1<f64>>> {
-        let eval_view = evaluation_points.as_array();
+    ) -> PyResult<Bound<'a, PyArray1<f32>>> {
+        // Convert f64 array to f32 array
+        let eval_f64 = evaluation_points.as_array();
+        let eval_f32: ndarray::Array2<f32> = eval_f64.mapv(|x| x as f32);
+
         let result = self
             .fastpd
-            .pd_function(&eval_view, &feature_subset)
+            .pd_function(&eval_f32.view(), &feature_subset)
             .map_err(|e| {
                 PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("FastPD error: {}", e))
             })?;
@@ -105,9 +109,12 @@ impl FastPDPy {
         &self,
         py: Python<'a>,
         evaluation_points: PyReadonlyArray2<f64>,
-    ) -> PyResult<Bound<'a, PyArray1<f64>>> {
-        let eval_view = evaluation_points.as_array();
-        let result = self.fastpd.predict(&eval_view).map_err(|e| {
+    ) -> PyResult<Bound<'a, PyArray1<f32>>> {
+        // Convert f64 array to f32 array
+        let eval_f64 = evaluation_points.as_array();
+        let eval_f32: ndarray::Array2<f32> = eval_f64.mapv(|x| x as f32);
+
+        let result = self.fastpd.predict(&eval_f32.view()).map_err(|e| {
             PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("FastPD error: {}", e))
         })?;
 

@@ -144,7 +144,7 @@ impl ObservationSet {
     /// - `right_set` contains indices where the feature value satisfies the right child condition
     pub fn split_by_threshold(
         &self,
-        data: &ArrayView2<f64>,
+        data: &ArrayView2<f32>,
         feature: FeatureIndex,
         threshold: Threshold,
         strict: bool,

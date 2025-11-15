@@ -10,7 +10,7 @@ impl TreeModel for XGBoostTreeModel {
         self.tree.node_feature(node_id)
     }
 
-    fn node_threshold(&self, node_id: usize) -> Option<f64> {
+    fn node_threshold(&self, node_id: usize) -> Option<f32> {
         self.tree.node_threshold(node_id)
     }
 
@@ -26,7 +26,7 @@ impl TreeModel for XGBoostTreeModel {
         self.tree.is_leaf(node_id)
     }
 
-    fn leaf_value(&self, node_id: usize) -> Option<f64> {
+    fn leaf_value(&self, node_id: usize) -> Option<f32> {
         self.tree.leaf_value(node_id)
     }
 

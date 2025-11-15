@@ -30,10 +30,10 @@ use super::cache::PDCache;
 /// - Missing observation set for a feature subset
 pub fn evaluate_pd_function<T: TreeModel>(
     augmented_tree: &AugmentedTree<T>,
-    evaluation_point: &ArrayView1<f64>,
+    evaluation_point: &ArrayView1<f32>,
     feature_subset: &[FeatureIndex],
     cache: &mut PDCache,
-) -> Result<f64, FastPDError> {
+) -> Result<f32, FastPDError> {
     // Note: We validate the evaluation point dimension during tree traversal
     // when we check if feature indices are within bounds
 
@@ -83,10 +83,10 @@ pub fn evaluate_pd_function<T: TreeModel>(
 fn evaluate_recursive<T: TreeModel>(
     tree: &T,
     node_id: usize,
-    point: &ArrayView1<f64>,
+    point: &ArrayView1<f32>,
     feature_subset: &FeatureSubset,
     augmented_tree: &AugmentedTree<T>,
-) -> Result<f64, FastPDError> {
+) -> Result<f32, FastPDError> {
     if tree.is_leaf(node_id) {
         // Get U_j = U ∩ T_j
         let path_features = augmented_tree
@@ -105,7 +105,7 @@ fn evaluate_recursive<T: TreeModel>(
             .ok_or(FastPDError::MissingObservationSet)?;
 
         // Compute empirical probability: |D_{U_j}| / n_b
-        let prob = shared_obs_set.len() as f64 / augmented_tree.n_background as f64;
+        let prob = shared_obs_set.len() as f32 / augmented_tree.n_background as f32;
 
         // Get leaf value
         let leaf_value = tree
@@ -300,12 +300,12 @@ mod tests {
             [7.319939, 5.986585],
             [1.560186, 1.559945],
             [0.580836, 8.661761],
-            [6.011150, 7.080726],
+            [6.011_15, 7.080726],
             [0.205845, 9.699099],
             [8.324426, 2.123391],
-            [1.818250, 1.834045],
+            [1.818_25, 1.834045],
             [3.042422, 5.247564],
-            [4.319450, 2.912291],
+            [4.319_45, 2.912291],
         ]);
         let background_view = background.view();
         let n_b = background.nrows();
@@ -332,7 +332,7 @@ mod tests {
             let prediction = tree.predict(&synthetic);
             empirical_sum += prediction;
         }
-        let empirical_value = empirical_sum / n_b as f64;
+        let empirical_value = empirical_sum / n_b as f32;
 
         // They should match (within floating point tolerance)
         assert!(
@@ -358,7 +358,7 @@ mod tests {
             let prediction = tree.predict(&synthetic);
             empirical_sum2 += prediction;
         }
-        let empirical_value2 = empirical_sum2 / n_b as f64;
+        let empirical_value2 = empirical_sum2 / n_b as f32;
 
         assert!(
             (fastpd_value2 - empirical_value2).abs() < 1e-10,

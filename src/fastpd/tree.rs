@@ -2,8 +2,8 @@ use crate::fastpd::error::TreeExtractionError;
 
 /// Type aliases for tree model components used by FastPD.
 pub type FeatureIndex = usize;
-pub type Threshold = f64;
-pub type LeafValue = f64;
+pub type Threshold = f32;
+pub type LeafValue = f32;
 
 /// Unified representation of a tree node.
 /// This is the common structure used by all tree-based models (XGBoost, LightGBM, etc.).
@@ -14,7 +14,7 @@ pub struct TreeNode {
     /// Feature index for splitting (None for leaves).
     pub feature: Option<usize>,
     /// Threshold value for splitting (None for leaves).
-    pub threshold: Option<f64>,
+    pub threshold: Option<f32>,
     /// Left child index (for "yes" branch).
     /// The comparison semantics (strict < vs weak <=) are determined by the TreeModel implementation.
     pub left: Option<usize>,
@@ -25,7 +25,7 @@ pub struct TreeNode {
     /// If None, missing values follow the default (usually left/right based on model).
     pub missing: Option<usize>,
     /// Leaf value (Some for leaves, None for internal nodes).
-    pub leaf_value: Option<f64>,
+    pub leaf_value: Option<f32>,
 }
 
 /// Unified representation of a complete tree.
@@ -206,7 +206,7 @@ pub trait TreeModel: Send + Sync {
     ///
     /// # Panics
     /// Panics if the tree structure is invalid or if feature indices are out of bounds.
-    fn predict(&self, x: &[f64]) -> f64 {
+    fn predict(&self, x: &[f32]) -> f32 {
         let mut node_id = self.root();
         loop {
             if self.is_leaf(node_id) {

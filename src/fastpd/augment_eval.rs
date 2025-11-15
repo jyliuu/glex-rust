@@ -25,7 +25,7 @@ pub struct FastPD<T: TreeModel> {
     caches: Vec<PDCache>,
     /// Intercept/base_score term (e.g., from XGBoost)
     /// This is added to predictions but not to PD functions
-    intercept: f64,
+    intercept: f32,
 }
 
 impl<T: TreeModel> FastPD<T> {
@@ -48,8 +48,8 @@ impl<T: TreeModel> FastPD<T> {
     /// Returns `FastPDError` if augmentation fails for any tree
     pub fn new(
         trees: Vec<T>,
-        background_samples: &ArrayView2<f64>,
-        intercept: f64,
+        background_samples: &ArrayView2<f32>,
+        intercept: f32,
     ) -> Result<Self, FastPDError> {
         if background_samples.nrows() == 0 {
             return Err(FastPDError::EmptyBackground);
@@ -98,9 +98,9 @@ impl<T: TreeModel> FastPD<T> {
     /// Returns `FastPDError` if evaluation fails
     pub fn pd_function(
         &mut self,
-        evaluation_points: &ArrayView2<f64>,
+        evaluation_points: &ArrayView2<f32>,
         feature_subset: &[usize],
-    ) -> Result<Array1<f64>, FastPDError> {
+    ) -> Result<Array1<f32>, FastPDError> {
         let n_eval = evaluation_points.nrows();
         let mut results = Vec::with_capacity(n_eval);
 
@@ -142,7 +142,7 @@ impl<T: TreeModel> FastPD<T> {
     ///
     /// # Errors
     /// Returns `FastPDError` if evaluation fails (e.g., dimension mismatch)
-    pub fn predict(&self, evaluation_points: &ArrayView2<f64>) -> Result<Array1<f64>, FastPDError> {
+    pub fn predict(&self, evaluation_points: &ArrayView2<f32>) -> Result<Array1<f32>, FastPDError> {
         let n_eval = evaluation_points.nrows();
         let mut results = Vec::with_capacity(n_eval);
 
@@ -158,7 +158,7 @@ impl<T: TreeModel> FastPD<T> {
             let mut total = 0.0;
             for aug_tree in &self.augmented_trees {
                 // Convert ArrayView1 to slice for prediction
-                let point_slice: Vec<f64> = point.iter().copied().collect();
+                let point_slice: Vec<f32> = point.iter().copied().collect();
                 let prediction = aug_tree.tree.predict(&point_slice);
                 total += prediction;
             }

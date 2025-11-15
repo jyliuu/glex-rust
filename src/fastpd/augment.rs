@@ -30,7 +30,7 @@ use super::augmented_tree::AugmentedTree;
 /// - Feature indices are out of bounds
 pub fn augment_tree<T: TreeModel>(
     tree: T,
-    background_samples: &ArrayView2<f64>,
+    background_samples: &ArrayView2<f32>,
 ) -> Result<AugmentedTree<T>, FastPDError> {
     let n_background = background_samples.nrows();
     if n_background == 0 {
@@ -79,7 +79,7 @@ fn augment_recursive<T: TreeModel>(
     path_data: &mut HashMap<usize, PathData>,
     current_path_features: PathFeatures, // T
     current_path_data: PathData,         // P
-    background_samples: &ArrayView2<f64>,
+    background_samples: &ArrayView2<f32>,
     n_features: usize,
 ) -> Result<(), FastPDError> {
     if tree.is_leaf(node_id) {
