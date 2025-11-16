@@ -399,6 +399,7 @@ dependencies = [
  "csv",
  "ndarray",
  "ndarray-linalg",
+ "rustc-hash",
  "serde",
  "serde_json",
  "thiserror 2.0.17",
