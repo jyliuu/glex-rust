@@ -1,7 +1,7 @@
 use ndarray::ArrayView1;
 
 use crate::fastpd::error::FastPDError;
-use crate::fastpd::tree::{FeatureIndex, TreeModel};
+use crate::fastpd::tree::TreeModel;
 use crate::fastpd::types::FeatureSubset;
 
 use super::augmented_tree::AugmentedTree;
@@ -29,17 +29,17 @@ use super::cache::PDCache;
 pub fn evaluate_pd_function<T: TreeModel>(
     augmented_tree: &AugmentedTree<T>,
     evaluation_point: &ArrayView1<f32>,
-    feature_subset: &[FeatureIndex],
+    feature_subset: &FeatureSubset,
     cache: &mut PDCache,
 ) -> Result<f32, FastPDError> {
     // Note: We validate the evaluation point dimension during tree traversal
     // when we check if feature indices are within bounds
 
-    // Create FeatureSubset from input without an intermediate Vec allocation
-    let subset_s = FeatureSubset::from_slice(feature_subset);
+    // Use provided FeatureSubset directly; callers are responsible for constructing it
+    let subset_s = feature_subset;
 
     // Check cache first for S
-    if let Some(cached) = cache.get(evaluation_point, &subset_s) {
+    if let Some(cached) = cache.get(evaluation_point, subset_s) {
         return Ok(cached);
     }
 
@@ -50,7 +50,7 @@ pub fn evaluate_pd_function<T: TreeModel>(
     // Check cache for U (different S may map to same U)
     if let Some(cached) = cache.get(evaluation_point, &u) {
         // Cache the result for S as well
-        cache.insert(evaluation_point, subset_s, cached);
+        cache.insert(evaluation_point, subset_s.clone(), cached);
         return Ok(cached);
     }
 
@@ -68,8 +68,8 @@ pub fn evaluate_pd_function<T: TreeModel>(
     )?;
 
     // Cache result for both U and S
-    cache.insert(evaluation_point, u.clone(), value);
-    cache.insert(evaluation_point, subset_s, value);
+    cache.insert(evaluation_point, u, value);
+    cache.insert(evaluation_point, subset_s.clone(), value);
 
     Ok(value)
 }
@@ -248,7 +248,7 @@ mod tests {
         // Value = 1.0 * 1.0 = 1.0
         let mut cache = PDCache::new();
         let point = arr1(&[0.3]);
-        let subset = vec![0];
+        let subset = FeatureSubset::from_slice(&[0]);
         let value = evaluate_pd_function(&aug_tree, &point.view(), &subset, &mut cache).unwrap();
         assert!((value - 1.0).abs() < 1e-10);
 
@@ -278,7 +278,7 @@ mod tests {
         // Total: 1.5
         let mut cache = PDCache::new();
         let point = arr1(&[0.5]);
-        let subset = vec![];
+        let subset = FeatureSubset::empty();
         let value = evaluate_pd_function(&aug_tree, &point.view(), &subset, &mut cache).unwrap();
         assert!((value - 1.5).abs() < 1e-10);
     }
@@ -294,7 +294,7 @@ mod tests {
         let point = arr1(&[0.3]);
 
         // First evaluation
-        let subset1 = vec![0];
+        let subset1 = FeatureSubset::from_slice(&[0]);
         let value1 = evaluate_pd_function(&aug_tree, &point.view(), &subset1, &mut cache).unwrap();
         // When S = {0}, U = {0} ∩ {0} = {0}, so U = S
         // We cache for both U and S, but they're the same key, so cache has 1 entry
@@ -306,7 +306,7 @@ mod tests {
 
         // Test with different S that maps to same U
         // S = {0, 99} where 99 is not in tree, so U = {0} ∩ {0} = {0}
-        let subset2 = vec![0, 99];
+        let subset2 = FeatureSubset::from_slice(&[0, 99]);
         let value3 = evaluate_pd_function(&aug_tree, &point.view(), &subset2, &mut cache).unwrap();
         // Should use cached value for U = {0}
         assert_eq!(value1, value3);
@@ -343,7 +343,7 @@ mod tests {
         // Test case 1: S = {0}, x = [0.3, 0.0] (x_1 doesn't matter for S={0})
         // Empirical PD: (1/10) * sum_{i=1}^{10} m([0.3, X^{(i)}_1])
         let evaluation_point = arr1(&[0.3, 0.0]);
-        let subset = vec![0];
+        let subset = FeatureSubset::from_slice(&[0]);
 
         // Compute FastPD estimate
         let mut cache = PDCache::new();
@@ -372,7 +372,7 @@ mod tests {
         // Test case 2: S = {} (empty subset), x = [0.5, 0.0]
         // Empirical PD: (1/10) * sum_{i=1}^{10} m([X^{(i)}_0, X^{(i)}_1]) = average of all predictions
         let evaluation_point2 = arr1(&[0.5, 0.0]);
-        let subset2 = vec![];
+        let subset2 = FeatureSubset::empty();
 
         let fastpd_value2 =
             evaluate_pd_function(&aug_tree, &evaluation_point2.view(), &subset2, &mut cache)

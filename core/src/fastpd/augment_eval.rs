@@ -6,6 +6,7 @@ use crate::fastpd::cache::PDCache;
 use crate::fastpd::error::FastPDError;
 use crate::fastpd::evaluate::evaluate_pd_function;
 use crate::fastpd::tree::TreeModel;
+use crate::fastpd::types::FeatureSubset;
 
 /// High-level FastPD estimator for computing partial dependence functions.
 ///
@@ -104,6 +105,9 @@ impl<T: TreeModel> FastPD<T> {
         let n_eval = evaluation_points.nrows();
         let mut results = Vec::with_capacity(n_eval);
 
+        // Construct FeatureSubset for S once per batch of evaluation points
+        let subset_s = FeatureSubset::from_slice(feature_subset);
+
         for i in 0..n_eval {
             let point = evaluation_points.row(i);
 
@@ -118,7 +122,7 @@ impl<T: TreeModel> FastPD<T> {
                 // Use cache for this tree
                 let cache = &mut self.caches[tree_idx];
 
-                let value = evaluate_pd_function(aug_tree, &point, feature_subset, cache)?;
+                let value = evaluate_pd_function(aug_tree, &point, &subset_s, cache)?;
                 total += value;
             }
             total += self.intercept;
