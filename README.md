@@ -41,12 +41,13 @@ cd glex-rust
 pip install .
 ```
 
-For development/editable install:
+For development/editable install (recommended):
 ```bash
+# Installs the Python package using the `python` crate via pyproject.toml
 pip install -e .
 ```
 
-Alternatively, you can use `maturin` directly:
+Alternatively, you can use `maturin` directly (this uses the `python/Cargo.toml` crate under the hood):
 ```bash
 # Install maturin first
 pip install maturin
@@ -163,19 +164,33 @@ for i, tree in enumerate(trees):
 
 ### Running Tests
 
-Run Rust unit tests:
+#### Rust tests
+
+This repository is now a Cargo workspace with two crates:
+
+- `core/` – pure Rust FastPD core (`glex-core` crate)
+- `python/` – PyO3 bindings crate used for the Python package
+
+Run all Rust tests for the workspace:
 ```bash
-cargo test
+cargo test --workspace
 ```
 
-Run Python integration tests:
+Or just the core crate:
+```bash
+cargo test -p glex-core
+```
+
+#### Python integration tests
+
+First, build and install the extension in your virtual environment (one-time per env or after code changes):
+```bash
+pip install -e .              # or: maturin develop
+```
+
+Then run the Python tests from the repository root:
 ```bash
 pytest tests/
-```
-
-Run both:
-```bash
-cargo test && pytest tests/
 ```
 
 ### Building for Distribution
@@ -203,15 +218,23 @@ The implementation achieves linear scaling with the number of evaluation points 
 ## Dependencies
 
 ### Rust Dependencies
-- `pyo3`: Python bindings
-- `numpy`: NumPy array integration
-- `ndarray`: N-dimensional arrays
-- `ndarray-linalg`: Linear algebra operations
-- `serde` / `serde_json`: JSON parsing for XGBoost models
-- `thiserror`: Error handling
+
+The workspace contains two Rust crates:
+
+- **`glex-core` (core crate)**:
+  - `ndarray`: N-dimensional arrays
+  - `ndarray-linalg`: Linear algebra operations
+  - `serde` / `serde_json`: JSON parsing for XGBoost models
+  - `thiserror`: Error handling
+
+- **`glex-rust` (Python bindings crate in `python/`)**:
+  - `pyo3`: Python bindings
+  - `numpy`: NumPy array integration
+  - `ndarray`: used for array conversions
+  - `serde_json`: used by the Python bridge to parse booster config
 
 ### Python Dependencies
-- Python >= 3.8
+- Python >= 3.12
 - NumPy
 - XGBoost (for model training)
 

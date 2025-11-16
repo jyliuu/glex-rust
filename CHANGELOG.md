@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] - 2025-11-16
+
+### Changed
+- Refactored the project into a Cargo workspace with two crates:
+  - `glex-core`: pure Rust FastPD core and XGBoost JSON parsing without any PyO3 dependency.
+  - `glex-rust` (python): PyO3 bindings crate used by maturin, depending on `glex-core`.
+- Updated `pyproject.toml` to build the Python extension via the new `python` crate.
+- Removed the legacy monolithic `src/` crate in favor of the workspace layout.
+- Preserved the Python public API (`glex_rust` package and its symbols) while changing the internal structure.
+
 ## [0.1.1] - 2025-01-27
 
 ### Fixed
