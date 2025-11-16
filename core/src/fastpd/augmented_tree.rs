@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use crate::fastpd::tree::TreeModel;
-use crate::fastpd::types::{PathData, PathFeatures};
+use crate::fastpd::types::{FeatureSubset, PathData};
 
 /// Augmented tree storing path features and path data for each leaf.
 ///
@@ -21,12 +21,18 @@ use crate::fastpd::types::{PathData, PathFeatures};
 pub struct AugmentedTree<T: TreeModel> {
     /// The original tree model.
     pub tree: T,
-    /// Maps leaf node ID -> path features T_j.
-    pub path_features: HashMap<usize, PathFeatures>,
+    /// Maps leaf node ID -> path features T_j (sorted, deduplicated feature indices).
+    pub path_features: HashMap<usize, FeatureSubset>,
     /// Maps leaf node ID -> path data P_j.
     pub path_data: HashMap<usize, PathData>,
     /// Number of background samples used for augmentation.
     pub n_background: usize,
+    /// Union of all path features across leaves: U_T = ⋃_j T_j.
+    ///
+    /// This is precomputed once during augmentation so that evaluation of
+    /// v_S(x_S) does not need to recompute the union of all path features
+    /// for every query.
+    pub all_tree_features: FeatureSubset,
 }
 
 impl<T: TreeModel> AugmentedTree<T> {
@@ -37,17 +43,20 @@ impl<T: TreeModel> AugmentedTree<T> {
     /// * `n_background` - Number of background samples
     /// * `path_features` - Path features T_j for each leaf j
     /// * `path_data` - Path data P_j for each leaf j
+    /// * `all_tree_features` - Union of all path features across leaves
     pub fn new(
         tree: T,
         n_background: usize,
-        path_features: HashMap<usize, PathFeatures>,
+        path_features: HashMap<usize, FeatureSubset>,
         path_data: HashMap<usize, PathData>,
+        all_tree_features: FeatureSubset,
     ) -> Self {
         Self {
             tree,
             path_features,
             path_data,
             n_background,
+            all_tree_features,
         }
     }
 
@@ -63,7 +72,7 @@ impl<T: TreeModel> AugmentedTree<T> {
     ///
     /// # Returns
     /// A reference to the path features, or `None` if the leaf doesn't exist.
-    pub fn get_path_features(&self, leaf_id: usize) -> Option<&PathFeatures> {
+    pub fn get_path_features(&self, leaf_id: usize) -> Option<&FeatureSubset> {
         self.path_features.get(&leaf_id)
     }
 
@@ -79,7 +88,7 @@ impl<T: TreeModel> AugmentedTree<T> {
     }
 
     /// Sets the path features for a given leaf node.
-    pub fn set_path_features(&mut self, leaf_id: usize, features: PathFeatures) {
+    pub fn set_path_features(&mut self, leaf_id: usize, features: FeatureSubset) {
         self.path_features.insert(leaf_id, features);
     }
 
@@ -133,7 +142,13 @@ mod tests {
     #[test]
     fn test_augmented_tree_new() {
         let tree = create_simple_tree();
-        let aug_tree = AugmentedTree::new(tree, 100, HashMap::new(), HashMap::new());
+        let aug_tree = AugmentedTree::new(
+            tree,
+            100,
+            HashMap::new(),
+            HashMap::new(),
+            FeatureSubset::empty(),
+        );
 
         assert_eq!(aug_tree.n_background, 100);
         assert_eq!(aug_tree.num_leaves(), 0);
@@ -143,9 +158,10 @@ mod tests {
     fn test_augmented_tree_path_features() {
         let tree = create_simple_tree();
         let mut path_features = HashMap::new();
-        let features = vec![0];
+        let features = FeatureSubset::new(vec![0]);
         path_features.insert(1, features.clone());
-        let aug_tree = AugmentedTree::new(tree, 100, path_features, HashMap::new());
+        let aug_tree =
+            AugmentedTree::new(tree, 100, path_features, HashMap::new(), features.clone());
 
         assert_eq!(aug_tree.get_path_features(1), Some(&features));
         assert_eq!(aug_tree.num_leaves(), 1);
@@ -160,7 +176,13 @@ mod tests {
         let obs_set: SharedObservationSet = Arc::new(ObservationSet::all(100));
         path_data.insert(empty_subset.clone(), obs_set.clone());
         path_data_map.insert(1, path_data.clone());
-        let aug_tree = AugmentedTree::new(tree, 100, HashMap::new(), path_data_map);
+        let aug_tree = AugmentedTree::new(
+            tree,
+            100,
+            HashMap::new(),
+            path_data_map,
+            FeatureSubset::empty(),
+        );
 
         let retrieved = aug_tree.get_path_data(1);
         assert!(retrieved.is_some());

@@ -5,9 +5,7 @@ use ndarray::ArrayView2;
 
 use crate::fastpd::error::FastPDError;
 use crate::fastpd::tree::TreeModel;
-use crate::fastpd::types::{
-    FeatureSubset, ObservationSet, PathData, PathFeatures, SharedObservationSet,
-};
+use crate::fastpd::types::{FeatureSubset, ObservationSet, PathData, SharedObservationSet};
 
 use super::augmented_tree::AugmentedTree;
 
@@ -55,30 +53,42 @@ pub fn augment_tree<T: TreeModel>(
         tree.root(),
         &mut path_features,
         &mut path_data,
-        Vec::new(),        // T (path features so far)
-        initial_path_data, // P (path data so far)
+        FeatureSubset::empty(), // T (path features so far)
+        initial_path_data,      // P (path data so far)
         background_samples,
         n_features,
     )?;
+
+    // Precompute union of all path features across leaves: U_T = ⋃_j T_j.
+    // This is used during PD evaluation to compute U = S ∩ U_T without
+    // recomputing the union for every query.
+    let mut all_tree_features = FeatureSubset::empty();
+    for feats in path_features.values() {
+        // Union all path features
+        let feats_vec = feats.as_slice();
+        all_tree_features = all_tree_features.union(&feats_vec);
+    }
 
     Ok(AugmentedTree::new(
         tree,
         n_background,
         path_features,
         path_data,
+        all_tree_features,
     ))
 }
 
 /// Recursive helper function for tree augmentation.
 ///
 /// This implements the RECURSE function from Algorithm 1 in the paper.
+#[allow(clippy::too_many_arguments)]
 fn augment_recursive<T: TreeModel>(
     tree: &T,
     node_id: usize,
-    path_features: &mut HashMap<usize, PathFeatures>,
+    path_features: &mut HashMap<usize, FeatureSubset>,
     path_data: &mut HashMap<usize, PathData>,
-    current_path_features: PathFeatures, // T
-    current_path_data: PathData,         // P
+    current_path_features: FeatureSubset, // T
+    current_path_data: PathData,          // P
     background_samples: &ArrayView2<f32>,
     n_features: usize,
 ) -> Result<(), FastPDError> {
@@ -108,14 +118,9 @@ fn augment_recursive<T: TreeModel>(
         return Err(FastPDError::InvalidFeature(feature, n_features));
     }
 
-    // Build T_new: add d_j if it's not already in T
-    let mut new_path_features = current_path_features;
-    let feature_in_path = new_path_features.contains(&feature);
-    if !feature_in_path {
-        new_path_features.push(feature);
-        new_path_features.sort_unstable();
-        new_path_features.dedup();
-    }
+    // Build T_new: add d_j (OR is idempotent, so always safe to do)
+    let new_path_features = current_path_features.with_feature(feature);
+    let feature_in_path = current_path_features.contains(feature);
 
     // Collect original (S, D_S) pairs before processing (needed for S ∪ {d_j} case)
     let original_path_data: Vec<(FeatureSubset, SharedObservationSet)> =
@@ -152,10 +157,8 @@ fn augment_recursive<T: TreeModel>(
     // Use the ORIGINAL D_S (before filtering) for the union case
     if !feature_in_path {
         for (subset_s, original_obs_set) in original_path_data {
-            // Create S ∪ {d_j}
-            let mut union_features = subset_s.as_slice().to_vec();
-            union_features.push(feature);
-            let union_subset = FeatureSubset::new(union_features);
+            // Efficiently create S ∪ {d_j} using bitwise OR
+            let union_subset = subset_s.with_feature(feature);
 
             // Add (S ∪ {d_j}, D_S) to both children using original D_S
             // Arc::clone is cheap - we're sharing the same observation set
@@ -251,7 +254,7 @@ mod tests {
 
         // Check leaf 1 (left child)
         let path_features_1 = aug_tree.get_path_features(1).unwrap();
-        assert_eq!(path_features_1, &vec![0]); // Feature 0 is on the path
+        assert_eq!(path_features_1, &FeatureSubset::new(vec![0])); // Feature 0 is on the path
 
         let path_data_1 = aug_tree.get_path_data(1).unwrap();
         // Should have D_∅ (all samples that reach leaf 1 after filtering)
@@ -273,7 +276,7 @@ mod tests {
 
         // Check leaf 2 (right child)
         let path_features_2 = aug_tree.get_path_features(2).unwrap();
-        assert_eq!(path_features_2, &vec![0]);
+        assert_eq!(path_features_2, &FeatureSubset::new(vec![0]));
 
         let path_data_2 = aug_tree.get_path_data(2).unwrap();
         assert!(path_data_2.contains_key(&empty_subset));

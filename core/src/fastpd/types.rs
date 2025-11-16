@@ -5,82 +5,295 @@ use ndarray::ArrayView2;
 
 use crate::fastpd::tree::{FeatureIndex, Threshold};
 
+/// Number of bits per chunk in the bitmask
+const BITS_PER_CHUNK: usize = 64;
+
 /// Index of a sample in the background dataset.
 pub type SampleIndex = usize;
 
-/// Sorted feature subset for use as HashMap key.
+/// Feature subset represented as a bitmask for efficient operations.
 ///
-/// Feature subsets are stored as sorted, deduplicated vectors of feature indices.
-/// This allows efficient set operations (intersection, membership) and use as HashMap keys.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct FeatureSubset(pub Vec<FeatureIndex>);
+/// Optimized for small feature sets (< 64 features) using a single u64,
+/// with fallback to Vec<u64> for larger sets. This avoids Vec overhead
+/// for the common case while supporting up to 10,000+ features.
+#[derive(Debug, Clone)]
+pub enum FeatureSubset {
+    /// Small subset: single u64 for features 0-63 (most common case)
+    Small(u64),
+    /// Large subset: Vec<u64> for features >= 64
+    Large(Vec<u64>),
+}
 
 impl FeatureSubset {
-    /// Creates a new feature subset from a vector of feature indices.
-    /// The indices are sorted and deduplicated.
-    pub fn new(mut features: Vec<FeatureIndex>) -> Self {
-        features.sort_unstable();
-        features.dedup();
-        Self(features)
-    }
-
     /// Creates an empty feature subset.
     pub fn empty() -> Self {
-        Self(Vec::new())
+        Self::Small(0)
+    }
+
+    /// Creates a new feature subset from a vector of feature indices.
+    /// The indices are deduplicated automatically (bitmask naturally handles this).
+    pub fn new(features: Vec<FeatureIndex>) -> Self {
+        if features.is_empty() {
+            return Self::empty();
+        }
+
+        // Find max feature to determine required mask size
+        let max_feature = features.iter().max().copied().unwrap_or(0);
+
+        // Optimize for common case: single u64 for features < 64
+        if max_feature < BITS_PER_CHUNK {
+            let mut mask = 0u64;
+            for &feature in &features {
+                mask |= 1u64 << feature;
+            }
+            return Self::Small(mask);
+        }
+
+        // Large case: use Vec<u64>
+        let n_chunks = (max_feature / BITS_PER_CHUNK) + 1;
+        let mut mask = vec![0u64; n_chunks];
+
+        // Set bits for each feature
+        for &feature in &features {
+            let chunk_idx = feature / BITS_PER_CHUNK;
+            let bit_pos = feature % BITS_PER_CHUNK;
+            mask[chunk_idx] |= 1u64 << bit_pos;
+        }
+
+        Self::Large(mask)
     }
 
     /// Checks if the subset contains a given feature.
+    /// O(1) via bitwise operation.
     pub fn contains(&self, feature: FeatureIndex) -> bool {
-        self.0.binary_search(&feature).is_ok()
+        match self {
+            Self::Small(mask) => feature < BITS_PER_CHUNK && (*mask & (1u64 << feature)) != 0,
+            Self::Large(mask) => {
+                let chunk_idx = feature / BITS_PER_CHUNK;
+                let bit_pos = feature % BITS_PER_CHUNK;
+                chunk_idx < mask.len() && (mask[chunk_idx] & (1u64 << bit_pos)) != 0
+            }
+        }
     }
 
-    /// Returns the intersection of this subset with another set of features.
-    /// The result is a new sorted, deduplicated feature subset.
-    pub fn intersect(&self, other: &[FeatureIndex]) -> Self {
-        let mut res = Vec::new();
-        let mut i = 0;
-        let mut j = 0;
-        let mut other_sorted = other.to_vec();
-        other_sorted.sort_unstable();
-        other_sorted.dedup();
-
-        while i < self.0.len() && j < other_sorted.len() {
-            match self.0[i].cmp(&other_sorted[j]) {
-                std::cmp::Ordering::Less => i += 1,
-                std::cmp::Ordering::Greater => j += 1,
-                std::cmp::Ordering::Equal => {
-                    res.push(self.0[i]);
-                    i += 1;
-                    j += 1;
+    /// Returns a new subset with the given feature added.
+    /// More efficient than converting to Vec and back.
+    pub fn with_feature(&self, feature: FeatureIndex) -> Self {
+        match self {
+            Self::Small(mask) => {
+                if feature < BITS_PER_CHUNK {
+                    Self::Small(mask | (1u64 << feature))
+                } else {
+                    // Need to convert to Large
+                    let mut new_mask = vec![*mask];
+                    let chunk_idx = feature / BITS_PER_CHUNK;
+                    let bit_pos = feature % BITS_PER_CHUNK;
+                    if chunk_idx >= new_mask.len() {
+                        new_mask.resize(chunk_idx + 1, 0);
+                    }
+                    new_mask[chunk_idx] |= 1u64 << bit_pos;
+                    Self::Large(new_mask)
+                }
+            }
+            Self::Large(mask) => {
+                let chunk_idx = feature / BITS_PER_CHUNK;
+                let bit_pos = feature % BITS_PER_CHUNK;
+                let mut new_mask = mask.clone();
+                if chunk_idx >= new_mask.len() {
+                    new_mask.resize(chunk_idx + 1, 0);
+                }
+                new_mask[chunk_idx] |= 1u64 << bit_pos;
+                // Convert to Small if result fits in single u64
+                if new_mask.len() == 1 {
+                    Self::Small(new_mask[0])
+                } else {
+                    Self::Large(new_mask)
                 }
             }
         }
-        FeatureSubset(res)
+    }
+
+    /// Returns the intersection of this subset with another FeatureSubset.
+    /// Uses bitwise AND for efficient computation.
+    pub fn intersect_with(&self, other: &FeatureSubset) -> Self {
+        match (self, other) {
+            (Self::Small(a), Self::Small(b)) => Self::Small(a & b),
+            (Self::Small(a), Self::Large(b)) => {
+                if b.is_empty() {
+                    Self::Small(0)
+                } else {
+                    Self::Small(a & b[0])
+                }
+            }
+            (Self::Large(a), Self::Small(b)) => {
+                if a.is_empty() {
+                    Self::Small(0)
+                } else {
+                    Self::Small(a[0] & b)
+                }
+            }
+            (Self::Large(a), Self::Large(b)) => {
+                let common_size = a.len().min(b.len());
+                let mut result = vec![0u64; common_size];
+                for i in 0..common_size {
+                    result[i] = a[i] & b[i];
+                }
+                // Convert to Small if result fits in single u64 (all chunks after first are zero)
+                if result.len() == 1 {
+                    Self::Small(result[0])
+                } else {
+                    Self::Large(result)
+                }
+            }
+        }
+    }
+
+    /// Returns the intersection of this subset with another set of features.
+    /// Uses bitwise AND for efficient computation.
+    pub fn intersect(&self, other: &[FeatureIndex]) -> Self {
+        if other.is_empty() {
+            return Self::empty();
+        }
+
+        let other_subset = Self::new(other.to_vec());
+        self.intersect_with(&other_subset)
     }
 
     /// Returns the union of this subset with another set of features.
-    /// The result is a new sorted, deduplicated feature subset.
+    /// Uses bitwise OR for efficient computation.
     pub fn union(&self, other: &[FeatureIndex]) -> Self {
-        let mut res = self.0.clone();
-        res.extend_from_slice(other);
-        res.sort_unstable();
-        res.dedup();
-        FeatureSubset(res)
+        if other.is_empty() {
+            return self.clone();
+        }
+
+        let other_subset = Self::new(other.to_vec());
+        match (self, &other_subset) {
+            (Self::Small(a), Self::Small(b)) => Self::Small(a | b),
+            (Self::Small(a), Self::Large(b)) => {
+                let mut result = b.clone();
+                if !result.is_empty() {
+                    result[0] |= a;
+                } else {
+                    result.push(*a);
+                }
+                Self::Large(result)
+            }
+            (Self::Large(a), Self::Small(b)) => {
+                let mut result = a.clone();
+                if !result.is_empty() {
+                    result[0] |= b;
+                } else {
+                    result.push(*b);
+                }
+                Self::Large(result)
+            }
+            (Self::Large(a), Self::Large(b)) => {
+                let max_size = a.len().max(b.len());
+                let mut result = vec![0u64; max_size];
+                for i in 0..a.len() {
+                    result[i] = a[i];
+                }
+                for i in 0..b.len() {
+                    result[i] |= b[i];
+                }
+                Self::Large(result)
+            }
+        }
     }
 
     /// Returns the number of features in the subset.
+    /// Counts set bits (popcount).
     pub fn len(&self) -> usize {
-        self.0.len()
+        match self {
+            Self::Small(mask) => mask.count_ones() as usize,
+            Self::Large(mask) => mask.iter().map(|chunk| chunk.count_ones() as usize).sum(),
+        }
     }
 
     /// Checks if the subset is empty.
     pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
+        match self {
+            Self::Small(mask) => *mask == 0,
+            Self::Large(mask) => mask.iter().all(|&chunk| chunk == 0),
+        }
     }
 
-    /// Returns a reference to the underlying sorted vector.
-    pub fn as_slice(&self) -> &[FeatureIndex] {
-        &self.0
+    /// Returns a sorted vector of feature indices.
+    /// Converts bitmask back to Vec<FeatureIndex> for compatibility.
+    pub fn as_slice(&self) -> Vec<FeatureIndex> {
+        let mut features = Vec::new();
+        match self {
+            Self::Small(mask) => {
+                if *mask == 0 {
+                    return features;
+                }
+                for bit_pos in 0..BITS_PER_CHUNK {
+                    if (*mask & (1u64 << bit_pos)) != 0 {
+                        features.push(bit_pos);
+                    }
+                }
+            }
+            Self::Large(mask) => {
+                for (chunk_idx, &chunk) in mask.iter().enumerate() {
+                    if chunk == 0 {
+                        continue;
+                    }
+                    for bit_pos in 0..BITS_PER_CHUNK {
+                        if (chunk & (1u64 << bit_pos)) != 0 {
+                            features.push(chunk_idx * BITS_PER_CHUNK + bit_pos);
+                        }
+                    }
+                }
+            }
+        }
+        features
+    }
+}
+
+impl PartialEq for FeatureSubset {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Small(a), Self::Small(b)) => a == b,
+            (Self::Small(a), Self::Large(b)) => {
+                b.len() == 1 && b[0] == *a && b.iter().skip(1).all(|&x| x == 0)
+            }
+            (Self::Large(a), Self::Small(b)) => {
+                a.len() == 1 && a[0] == *b && a.iter().skip(1).all(|&x| x == 0)
+            }
+            (Self::Large(a), Self::Large(b)) => {
+                let max_len = a.len().max(b.len());
+                for i in 0..max_len {
+                    let a_chunk = a.get(i).copied().unwrap_or(0);
+                    let b_chunk = b.get(i).copied().unwrap_or(0);
+                    if a_chunk != b_chunk {
+                        return false;
+                    }
+                }
+                true
+            }
+        }
+    }
+}
+
+impl Eq for FeatureSubset {}
+
+impl std::hash::Hash for FeatureSubset {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        match self {
+            Self::Small(mask) => {
+                mask.hash(state);
+                // Tag to distinguish from Large with single chunk
+                0u8.hash(state);
+            }
+            Self::Large(mask) => {
+                for &chunk in mask {
+                    chunk.hash(state);
+                }
+                mask.len().hash(state);
+                // Tag to distinguish from Small
+                1u8.hash(state);
+            }
+        }
     }
 }
 
@@ -186,12 +399,6 @@ pub type SharedObservationSet = Arc<ObservationSet>;
 /// For each leaf j, this stores the observation sets D_S for each feature subset S
 /// encountered on the path from root to leaf j.
 pub type PathData = HashMap<FeatureSubset, SharedObservationSet>;
-
-/// Path features T_j: features encountered on path to leaf j.
-///
-/// This is a vector of feature indices in the order they appear on the path
-/// from root to leaf j.
-pub type PathFeatures = Vec<FeatureIndex>;
 
 #[cfg(test)]
 mod tests {

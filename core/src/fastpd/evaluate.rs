@@ -1,5 +1,3 @@
-use std::collections::HashSet;
-
 use ndarray::ArrayView1;
 
 use crate::fastpd::error::FastPDError;
@@ -45,18 +43,9 @@ pub fn evaluate_pd_function<T: TreeModel>(
         return Ok(cached);
     }
 
-    // Compute U = S ∩ (union of all T_j)
-    // Collect all features that appear in any path
-    let mut all_tree_features = HashSet::new();
-    for path_features in augmented_tree.path_features.values() {
-        for &feature in path_features {
-            all_tree_features.insert(feature);
-        }
-    }
-    let mut all_tree_features_vec: Vec<FeatureIndex> = all_tree_features.into_iter().collect();
-    all_tree_features_vec.sort_unstable();
-
-    let u = subset_s.intersect(&all_tree_features_vec);
+    // Compute U = S ∩ (union of all T_j) using the precomputed union of
+    // path features stored in the augmented tree.
+    let u = subset_s.intersect_with(&augmented_tree.all_tree_features);
 
     // Check cache for U (different S may map to same U)
     if let Some(cached) = cache.get(evaluation_point, &u) {
@@ -93,7 +82,7 @@ fn evaluate_recursive<T: TreeModel>(
             .path_features
             .get(&node_id)
             .ok_or_else(|| FastPDError::InvalidTree("Leaf missing path features".into()))?;
-        let u_j = feature_subset.intersect(path_features);
+        let u_j = feature_subset.intersect_with(path_features);
 
         // Get D_{U_j} from P_j
         let path_data = augmented_tree
