@@ -7,9 +7,9 @@ named `glex_rust`, the compiled extension is installed as the submodule
 package level so callers can simply `import glex_rust` and use them.
 """
 
-from .glex_rust import FastPDPy, extract_trees_from_xgboost
+from .glex_rust import FastPDPy, all_subsets, extract_trees_from_xgboost
 
 # Alias FastPDPy as FastPD for cleaner API
 FastPD = FastPDPy
 
-__all__ = ["extract_trees_from_xgboost", "FastPD", "FastPDPy"]
+__all__ = ["extract_trees_from_xgboost", "all_subsets", "FastPD", "FastPDPy"]

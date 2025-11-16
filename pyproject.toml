@@ -4,8 +4,8 @@ build-backend = "maturin"
 
 [project]
 name = "glex-rust"
-version = "0.1.1"
-requires-python = ">=3.8"
+version = "0.2.0"
+requires-python = ">=3.12"
 authors = [
     {name = "Jinyang Liu", email = "jl@math.ku.dk"}
 ]
@@ -24,5 +24,7 @@ test = [
 ]
 
 [tool.maturin]
+manifest-path = "python/Cargo.toml"
+bindings = "pyo3"
+module-name = "glex_rust.glex_rust"
 python-source = "python"
-features = ["pyo3/extension-module"]
