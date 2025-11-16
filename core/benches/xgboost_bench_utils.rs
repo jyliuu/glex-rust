@@ -1,13 +1,29 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
-use ndarray::{Array1, Array2};
+use ndarray::Array2;
 
-use glex_core::{parse_json_tree, FastPD, Tree};
+use glex_core::{parse_json_tree, Tree};
+
+/// Dataset stems used in all XGBoost/FastPD benchmarks.
+pub const SYNTHETIC_LOW_DIM_STEMS: [&str; 3] = [
+    "synthetic_n200_p2",
+    "synthetic_n500_p3",
+    "synthetic_n1000_p5",
+];
+
+pub const SYNTHETIC_STEMS: [&str; 5] = [
+    "synthetic_n200_p2",
+    "synthetic_n500_p3",
+    "synthetic_n1000_p5",
+    "synthetic_n2000_p7",
+    "synthetic_n5000_p10",
+];
+
+pub const CALIFORNIA_STEM: &str = "california_housing";
 
 /// Resolve the workspace root (parent of the `core` crate).
-fn workspace_root() -> PathBuf {
+pub fn workspace_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .expect("core has a parent directory")
@@ -17,7 +33,7 @@ fn workspace_root() -> PathBuf {
 /// Load feature matrix X (all columns except last) from a CSV file.
 ///
 /// Assumes header row and that the last column is the target `y`.
-fn load_features_from_csv(path: &Path) -> Array2<f32> {
+pub fn load_features_from_csv(path: &Path) -> Array2<f32> {
     let mut reader = csv::Reader::from_path(path)
         .unwrap_or_else(|e| panic!("Failed to open CSV {}: {e}", path.display()));
 
@@ -64,31 +80,8 @@ fn load_features_from_csv(path: &Path) -> Array2<f32> {
     array
 }
 
-/// Compute per-feature median to obtain a single "median datapoint".
-fn median_point(data: &Array2<f32>) -> Array1<f32> {
-    let n_features = data.ncols();
-    let mut medians = Vec::with_capacity(n_features);
-
-    for j in 0..n_features {
-        let mut col: Vec<f32> = data.column(j).iter().copied().collect();
-        col.sort_by(|a, b| a.partial_cmp(b).unwrap());
-
-        let m = col.len();
-        let median = if m == 0 {
-            0.0
-        } else if m % 2 == 1 {
-            col[m / 2]
-        } else {
-            0.5 * (col[m / 2 - 1] + col[m / 2])
-        };
-        medians.push(median);
-    }
-
-    Array1::from(medians)
-}
-
 /// Compute some simple statistics about a tree: (num_nodes, num_leaves, max_depth, num_features_used).
-fn tree_stats(tree: &Tree) -> (usize, usize, usize, usize) {
+pub fn tree_stats(tree: &Tree) -> (usize, usize, usize, usize) {
     use std::collections::HashSet;
 
     let num_nodes = tree.nodes.len();
@@ -123,7 +116,7 @@ fn tree_stats(tree: &Tree) -> (usize, usize, usize, usize) {
 /// Load XGBoost trees from a JSON dump produced by `Booster.get_dump(dump_format="json")`.
 ///
 /// The file is expected to contain a JSON array of strings, one JSON object per tree.
-fn load_xgboost_trees(path: &Path) -> Vec<Tree> {
+pub fn load_xgboost_trees(path: &Path) -> Vec<Tree> {
     let contents = fs::read_to_string(path)
         .unwrap_or_else(|e| panic!("Failed to read model {}: {e}", path.display()));
     let dump: Vec<String> = serde_json::from_str(&contents)
@@ -139,81 +132,7 @@ fn load_xgboost_trees(path: &Path) -> Vec<Tree> {
                     path.display()
                 )
             });
-
-            let (num_nodes, num_leaves, max_depth, num_features_used) = tree_stats(&tree);
-            println!(
-                "Loaded tree {}: nodes={}, leaves={}, max_depth={}, features_used={}",
-                idx,
-                num_nodes,
-                num_leaves,
-                max_depth,
-                num_features_used
-            );
-
             tree
         })
         .collect()
 }
-
-fn benchmark_fastpd_for_dataset(
-    group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>,
-    dataset_stem: &str,
-) {
-    let root = workspace_root();
-    let data_dir = root.join("data");
-    let datasets_dir = data_dir.join("datasets");
-    let models_dir = data_dir.join("models");
-
-    let csv_path = datasets_dir.join(format!("{dataset_stem}.csv"));
-    let model_path = models_dir.join(format!("{dataset_stem}_xgb.json"));
-
-    let background = load_features_from_csv(&csv_path);
-    let eval_point = median_point(&background);
-
-    let trees = load_xgboost_trees(&model_path);
-    let n_features = background.ncols();
-    let all_features: Vec<usize> = (0..n_features).collect();
-
-    // Use the whole dataset as background for augmentation
-    let background_view = background.view();
-    let mut fastpd = FastPD::new(trees, &background_view, 0.0).expect("Failed to construct FastPD");
-
-    // Single evaluation point (1, n_features)
-    let mut eval_points = Array2::<f32>::zeros((1, n_features));
-    eval_points.row_mut(0).assign(&eval_point);
-    let eval_view = eval_points.view();
-
-    group.bench_function(BenchmarkId::from_parameter(dataset_stem), |b| {
-        b.iter(|| {
-            let result = fastpd
-                .pd_function(&eval_view, &all_features)
-                .expect("FastPD evaluation failed");
-            black_box(result);
-        });
-    });
-}
-
-fn fastpd_xgboost_benchmarks(c: &mut Criterion) {
-    let mut group = c.benchmark_group("fastpd_xgboost_median_point");
-
-    // Synthetic datasets of increasing dimensionality
-    let synthetic_stems = [
-        "synthetic_n200_p2",
-        "synthetic_n500_p3",
-        "synthetic_n1000_p5",
-        "synthetic_n2000_p7",
-        "synthetic_n5000_p10",
-    ];
-
-    for stem in &synthetic_stems {
-        benchmark_fastpd_for_dataset(&mut group, stem);
-    }
-
-    // California housing dataset
-    benchmark_fastpd_for_dataset(&mut group, "california_housing");
-
-    group.finish();
-}
-
-criterion_group!(benches, fastpd_xgboost_benchmarks);
-criterion_main!(benches);
