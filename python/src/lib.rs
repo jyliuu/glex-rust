@@ -24,42 +24,6 @@ fn extract_trees_from_xgboost_py(model: Bound<'_, PyAny>) -> PyResult<Vec<XGBoos
     Ok(trees)
 }
 
-/// Generate all possible subsets of [0, 1, ..., p-1].
-///
-/// Returns all 2^p subsets, including the empty set.
-/// Subsets are returned as sorted vectors of feature indices.
-///
-/// # Arguments
-/// * `p` - Number of features (generates subsets of [0, 1, ..., p-1])
-///
-/// # Returns
-/// A list of all subsets, where each subset is a sorted list of feature indices.
-///
-/// # Example
-/// ```
-/// >>> all_subsets(3)
-/// [[], [0], [1], [2], [0, 1], [0, 2], [1, 2], [0, 1, 2]]
-/// ```
-#[pyfunction]
-fn all_subsets(p: usize) -> Vec<Vec<usize>> {
-    let mut subsets = Vec::new();
-
-    // Generate all subsets using bit manipulation
-    // For each number from 0 to 2^p - 1, interpret its binary representation
-    // as indicating which elements are in the subset
-    for mask in 0..(1usize << p) {
-        let mut subset = Vec::new();
-        for i in 0..p {
-            if mask & (1 << i) != 0 {
-                subset.push(i);
-            }
-        }
-        subsets.push(subset);
-    }
-
-    subsets
-}
-
 /// Python-facing wrapper for FastPD.
 ///
 /// This class provides efficient computation of partial dependence functions
@@ -186,7 +150,6 @@ impl FastPDPy {
 #[pymodule]
 fn glex_rust(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(extract_trees_from_xgboost_py, m)?)?;
-    m.add_function(wrap_pyfunction!(all_subsets, m)?)?;
     m.add_class::<XGBoostTreeModel>()?;
     m.add_class::<FastPDPy>()?;
     Ok(())
