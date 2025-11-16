@@ -33,17 +33,23 @@ impl FeatureSubset {
     /// Creates a new feature subset from a vector of feature indices.
     /// The indices are deduplicated automatically (bitmask naturally handles this).
     pub fn new(features: Vec<FeatureIndex>) -> Self {
+        Self::from_slice(&features)
+    }
+
+    /// Creates a new feature subset from a slice of feature indices.
+    /// This avoids an intermediate Vec allocation when the caller already has a slice.
+    pub fn from_slice(features: &[FeatureIndex]) -> Self {
         if features.is_empty() {
             return Self::empty();
         }
 
         // Find max feature to determine required mask size
-        let max_feature = features.iter().max().copied().unwrap_or(0);
+        let max_feature = features.iter().copied().max().unwrap_or(0);
 
         // Optimize for common case: single u64 for features < 64
         if max_feature < BITS_PER_CHUNK {
             let mut mask = 0u64;
-            for &feature in &features {
+            for &feature in features {
                 mask |= 1u64 << feature;
             }
             return Self::Small(mask);
@@ -54,7 +60,7 @@ impl FeatureSubset {
         let mut mask = vec![0u64; n_chunks];
 
         // Set bits for each feature
-        for &feature in &features {
+        for &feature in features {
             let chunk_idx = feature / BITS_PER_CHUNK;
             let bit_pos = feature % BITS_PER_CHUNK;
             mask[chunk_idx] |= 1u64 << bit_pos;
@@ -138,11 +144,57 @@ impl FeatureSubset {
                 for i in 0..common_size {
                     result[i] = a[i] & b[i];
                 }
-                // Convert to Small if result fits in single u64 (all chunks after first are zero)
-                if result.len() == 1 {
-                    Self::Small(result[0])
-                } else {
-                    Self::Large(result)
+                Self::Large(result)
+            }
+        }
+    }
+
+    /// Computes the intersection of this subset with another `FeatureSubset`,
+    /// writing the result into `out` to allow buffer reuse and reduce allocations.
+    ///
+    /// This is primarily intended for hot paths where a single scratch subset
+    /// can be reused many times (e.g., during tree evaluation).
+    pub fn intersect_with_into(&self, other: &FeatureSubset, out: &mut FeatureSubset) {
+        match (self, other) {
+            (Self::Small(a), Self::Small(b)) => {
+                *out = Self::Small(a & b);
+            }
+            (Self::Small(a), Self::Large(b)) => {
+                let result = if b.is_empty() { 0 } else { a & b[0] };
+                *out = Self::Small(result);
+            }
+            (Self::Large(a), Self::Small(b)) => {
+                let result = if a.is_empty() { 0 } else { a[0] & b };
+                *out = Self::Small(result);
+            }
+            (Self::Large(a), Self::Large(b)) => {
+                let common_size = a.len().min(b.len());
+                if common_size == 0 {
+                    *out = Self::Small(0);
+                    return;
+                }
+
+                match out {
+                    Self::Large(ref mut vec) => {
+                        if vec.len() < common_size {
+                            vec.resize(common_size, 0);
+                        }
+                        for (dst, (&lhs, &rhs)) in
+                            vec.iter_mut().zip(a.iter().zip(b.iter())).take(common_size)
+                        {
+                            *dst = lhs & rhs;
+                        }
+                    }
+                    Self::Small(_) => {
+                        let mut vec = Vec::with_capacity(common_size);
+                        vec.extend(
+                            a.iter()
+                                .zip(b.iter())
+                                .take(common_size)
+                                .map(|(&lhs, &rhs)| lhs & rhs),
+                        );
+                        *out = Self::Large(vec);
+                    }
                 }
             }
         }

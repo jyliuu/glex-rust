@@ -35,8 +35,8 @@ pub fn evaluate_pd_function<T: TreeModel>(
     // Note: We validate the evaluation point dimension during tree traversal
     // when we check if feature indices are within bounds
 
-    // Create FeatureSubset from input
-    let subset_s = FeatureSubset::new(feature_subset.to_vec());
+    // Create FeatureSubset from input without an intermediate Vec allocation
+    let subset_s = FeatureSubset::from_slice(feature_subset);
 
     // Check cache first for S
     if let Some(cached) = cache.get(evaluation_point, &subset_s) {
@@ -56,7 +56,16 @@ pub fn evaluate_pd_function<T: TreeModel>(
 
     // Traverse tree to compute v_U(x_U)
     let tree = &augmented_tree.tree;
-    let value = evaluate_recursive(tree, tree.root(), evaluation_point, &u, augmented_tree)?;
+    // Scratch subset reused across recursive calls to avoid per-leaf allocations
+    let mut scratch_subset = FeatureSubset::empty();
+    let value = evaluate_recursive(
+        tree,
+        tree.root(),
+        evaluation_point,
+        &u,
+        augmented_tree,
+        &mut scratch_subset,
+    )?;
 
     // Cache result for both U and S
     cache.insert(evaluation_point, u.clone(), value);
@@ -75,6 +84,7 @@ fn evaluate_recursive<T: TreeModel>(
     point: &ArrayView1<f32>,
     feature_subset: &FeatureSubset,
     augmented_tree: &AugmentedTree<T>,
+    scratch_subset: &mut FeatureSubset,
 ) -> Result<f32, FastPDError> {
     if tree.is_leaf(node_id) {
         // Get U_j = U ∩ T_j
@@ -82,7 +92,8 @@ fn evaluate_recursive<T: TreeModel>(
             .path_features
             .get(&node_id)
             .ok_or_else(|| FastPDError::InvalidTree("Leaf missing path features".into()))?;
-        let u_j = feature_subset.intersect_with(path_features);
+        // Compute U_j into a reusable scratch subset to avoid per-leaf allocations
+        feature_subset.intersect_with_into(path_features, scratch_subset);
 
         // Get D_{U_j} from P_j
         let path_data = augmented_tree
@@ -90,7 +101,7 @@ fn evaluate_recursive<T: TreeModel>(
             .get(&node_id)
             .ok_or_else(|| FastPDError::InvalidTree("Leaf missing path data".into()))?;
         let shared_obs_set = path_data
-            .get(&u_j)
+            .get(scratch_subset)
             .ok_or(FastPDError::MissingObservationSet)?;
 
         // Compute empirical probability: |D_{U_j}| / n_b
@@ -132,15 +143,42 @@ fn evaluate_recursive<T: TreeModel>(
             feature_value <= threshold
         };
         if go_left {
-            evaluate_recursive(tree, left_child, point, feature_subset, augmented_tree)
+            evaluate_recursive(
+                tree,
+                left_child,
+                point,
+                feature_subset,
+                augmented_tree,
+                scratch_subset,
+            )
         } else {
-            evaluate_recursive(tree, right_child, point, feature_subset, augmented_tree)
+            evaluate_recursive(
+                tree,
+                right_child,
+                point,
+                feature_subset,
+                augmented_tree,
+                scratch_subset,
+            )
         }
     } else {
         // d_j ∉ U: sum contributions from both children
-        let left_val = evaluate_recursive(tree, left_child, point, feature_subset, augmented_tree)?;
-        let right_val =
-            evaluate_recursive(tree, right_child, point, feature_subset, augmented_tree)?;
+        let left_val = evaluate_recursive(
+            tree,
+            left_child,
+            point,
+            feature_subset,
+            augmented_tree,
+            scratch_subset,
+        )?;
+        let right_val = evaluate_recursive(
+            tree,
+            right_child,
+            point,
+            feature_subset,
+            augmented_tree,
+            scratch_subset,
+        )?;
         Ok(left_val + right_val)
     }
 }
