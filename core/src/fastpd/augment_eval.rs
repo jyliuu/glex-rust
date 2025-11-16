@@ -157,9 +157,15 @@ impl<T: TreeModel> FastPD<T> {
             // Sum predictions from all trees
             let mut total = 0.0;
             for aug_tree in &self.augmented_trees {
-                // Convert ArrayView1 to slice for prediction
-                let point_slice: Vec<f32> = point.iter().copied().collect();
-                let prediction = aug_tree.tree.predict(&point_slice);
+                // Convert ArrayView1 to slice for prediction without allocating if possible.
+                // Most ndarray arrays backing model inputs are contiguous, so `as_slice()`
+                // should usually succeed and avoid per-evaluation allocations.
+                let prediction = if let Some(slice) = point.as_slice() {
+                    aug_tree.tree.predict(slice)
+                } else {
+                    let owned: Vec<f32> = point.iter().copied().collect();
+                    aug_tree.tree.predict(&owned)
+                };
                 total += prediction;
             }
             // Add intercept/base_score
