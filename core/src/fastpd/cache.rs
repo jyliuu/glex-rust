@@ -1,9 +1,12 @@
 use std::collections::HashMap;
-use std::hash::{Hash, Hasher};
+use std::hash::{BuildHasherDefault, Hash, Hasher};
 
 use ndarray::ArrayView1;
+use rustc_hash::FxHasher;
 
 use crate::fastpd::types::FeatureSubset;
+
+type FxHashMap<K, V> = HashMap<K, V, BuildHasherDefault<FxHasher>>;
 
 /// Cache for computed PD function values.
 ///
@@ -16,14 +19,17 @@ use crate::fastpd::types::FeatureSubset;
 /// so caching at the U level allows reuse across different S queries.
 #[derive(Debug)]
 pub struct PDCache {
-    cache: HashMap<(u64, FeatureSubset), f32>,
+    // Outer key: hash of the evaluation point.
+    // Inner key: feature subset (S or U). This layout avoids cloning the subset
+    // on every lookup and lets us use a faster hasher specialized for Hot PD workloads.
+    cache: FxHashMap<u64, FxHashMap<FeatureSubset, f32>>,
 }
 
 impl PDCache {
     /// Creates a new empty PD cache.
     pub fn new() -> Self {
         Self {
-            cache: HashMap::new(),
+            cache: FxHashMap::default(),
         }
     }
 
@@ -37,7 +43,9 @@ impl PDCache {
     /// The cached value if found, `None` otherwise.
     pub fn get(&self, point: &ArrayView1<f32>, subset: &FeatureSubset) -> Option<f32> {
         let hash = Self::hash_point(point);
-        self.cache.get(&(hash, subset.clone())).copied()
+        self.cache
+            .get(&hash)
+            .and_then(|inner| inner.get(subset).copied())
     }
 
     /// Inserts a PD value into the cache.
@@ -48,7 +56,7 @@ impl PDCache {
     /// * `value` - The computed PD value
     pub fn insert(&mut self, point: &ArrayView1<f32>, subset: FeatureSubset, value: f32) {
         let hash = Self::hash_point(point);
-        self.cache.insert((hash, subset), value);
+        self.cache.entry(hash).or_default().insert(subset, value);
     }
 
     /// Clears all cached values.
@@ -58,7 +66,7 @@ impl PDCache {
 
     /// Returns the number of cached entries.
     pub fn len(&self) -> usize {
-        self.cache.len()
+        self.cache.values().map(|inner| inner.len()).sum()
     }
 
     /// Checks if the cache is empty.
@@ -71,8 +79,7 @@ impl PDCache {
     /// This uses a simple hash of the point's coordinates. For better performance
     /// with many cache lookups, consider using `fxhash` or similar.
     fn hash_point(point: &ArrayView1<f32>) -> u64 {
-        use std::collections::hash_map::DefaultHasher;
-        let mut hasher = DefaultHasher::new();
+        let mut hasher = FxHasher::default();
         for &x in point.iter() {
             x.to_bits().hash(&mut hasher);
         }
