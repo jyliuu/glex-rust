@@ -1,37 +1,65 @@
 use ndarray::ArrayView1;
 
 use crate::fastpd::error::FastPDError;
+use crate::fastpd::parallel::{Joiner, RayonJoin, SeqJoin};
 use crate::fastpd::tree::TreeModel;
 use crate::fastpd::types::FeatureSubset;
 
 use super::augmented_tree::AugmentedTree;
 use super::cache::PDCache;
 
-/// Evaluates the partial dependence function v_S(x_S) using Algorithm 2 from the FastPD paper.
+/// Evaluates the partial dependence function v_S(x_S) sequentially.
 ///
-/// This function computes the partial dependence value for a given evaluation point
-/// and feature subset using the pre-computed augmented tree data.
+/// This is a thin wrapper around `evaluate_recursive::<T, SeqJoin>`.
+pub fn evaluate_pd_function_seq<T: TreeModel>(
+    augmented_tree: &AugmentedTree<T>,
+    evaluation_point: &ArrayView1<f32>,
+    feature_subset: &FeatureSubset,
+    cache: &mut PDCache,
+) -> Result<f32, FastPDError> {
+    evaluate_pd_function_impl::<T, SeqJoin>(augmented_tree, evaluation_point, feature_subset, cache)
+}
+
+/// Evaluates the partial dependence function v_S(x_S) in parallel.
 ///
-/// # Arguments
-/// * `augmented_tree` - The augmented tree containing path features and path data
-/// * `evaluation_point` - The evaluation point x (1D array)
-/// * `feature_subset` - The feature subset S (indices of features to compute PD for)
-/// * `cache` - Optional cache for storing computed values (can reuse across different S)
-///
-/// # Returns
-/// The partial dependence value v_S(x_S)
-///
-/// # Errors
-/// Returns `FastPDError` if:
-/// - Evaluation point dimension doesn't match tree features
-/// - Missing path features or path data for a leaf
-/// - Missing observation set for a feature subset
+/// This is a thin wrapper around `evaluate_recursive::<T, RayonJoin>`.
+/// **Important**: This function must be called from within a Rayon thread pool
+/// (via `ThreadPool::install()`) for proper parallel execution.
+pub fn evaluate_pd_function_rayon<T: TreeModel>(
+    augmented_tree: &AugmentedTree<T>,
+    evaluation_point: &ArrayView1<f32>,
+    feature_subset: &FeatureSubset,
+    cache: &mut PDCache,
+) -> Result<f32, FastPDError> {
+    evaluate_pd_function_impl::<T, RayonJoin>(
+        augmented_tree,
+        evaluation_point,
+        feature_subset,
+        cache,
+    )
+}
+
+/// Legacy function: delegates to `evaluate_pd_function_seq` for backward compatibility.
 pub fn evaluate_pd_function<T: TreeModel>(
     augmented_tree: &AugmentedTree<T>,
     evaluation_point: &ArrayView1<f32>,
     feature_subset: &FeatureSubset,
     cache: &mut PDCache,
 ) -> Result<f32, FastPDError> {
+    evaluate_pd_function_seq(augmented_tree, evaluation_point, feature_subset, cache)
+}
+
+/// Internal implementation of PD evaluation using the Joiner trait.
+fn evaluate_pd_function_impl<T, J>(
+    augmented_tree: &AugmentedTree<T>,
+    evaluation_point: &ArrayView1<f32>,
+    feature_subset: &FeatureSubset,
+    cache: &mut PDCache,
+) -> Result<f32, FastPDError>
+where
+    T: TreeModel,
+    J: Joiner,
+{
     // Note: We validate the evaluation point dimension during tree traversal
     // when we check if feature indices are within bounds
 
@@ -58,7 +86,7 @@ pub fn evaluate_pd_function<T: TreeModel>(
     let tree = &augmented_tree.tree;
     // Scratch subset reused across recursive calls to avoid per-leaf allocations
     let mut scratch_subset = FeatureSubset::empty();
-    let value = evaluate_recursive(
+    let value = evaluate_recursive::<T, J>(
         tree,
         tree.root(),
         evaluation_point,
@@ -78,14 +106,18 @@ pub fn evaluate_pd_function<T: TreeModel>(
 ///
 /// This function traverses the tree and computes the partial dependence contribution
 /// at each node, summing contributions from leaves where x_U would land.
-fn evaluate_recursive<T: TreeModel>(
+fn evaluate_recursive<T, J>(
     tree: &T,
     node_id: usize,
     point: &ArrayView1<f32>,
     feature_subset: &FeatureSubset,
     augmented_tree: &AugmentedTree<T>,
     scratch_subset: &mut FeatureSubset,
-) -> Result<f32, FastPDError> {
+) -> Result<f32, FastPDError>
+where
+    T: TreeModel,
+    J: Joiner,
+{
     if tree.is_leaf(node_id) {
         // Get U_j = U ∩ T_j
         let path_features = augmented_tree
@@ -143,7 +175,7 @@ fn evaluate_recursive<T: TreeModel>(
             feature_value <= threshold
         };
         if go_left {
-            evaluate_recursive(
+            evaluate_recursive::<T, J>(
                 tree,
                 left_child,
                 point,
@@ -152,7 +184,7 @@ fn evaluate_recursive<T: TreeModel>(
                 scratch_subset,
             )
         } else {
-            evaluate_recursive(
+            evaluate_recursive::<T, J>(
                 tree,
                 right_child,
                 point,
@@ -162,24 +194,33 @@ fn evaluate_recursive<T: TreeModel>(
             )
         }
     } else {
-        // d_j ∉ U: sum contributions from both children
-        let left_val = evaluate_recursive(
-            tree,
-            left_child,
-            point,
-            feature_subset,
-            augmented_tree,
-            scratch_subset,
-        )?;
-        let right_val = evaluate_recursive(
-            tree,
-            right_child,
-            point,
-            feature_subset,
-            augmented_tree,
-            scratch_subset,
-        )?;
-        Ok(left_val + right_val)
+        // d_j ∉ U: sum contributions from both children using Joiner trait
+        // Note: We need separate scratch subsets for left and right to avoid conflicts
+        let mut scratch_left = FeatureSubset::empty();
+        let mut scratch_right = FeatureSubset::empty();
+        let (left_val, right_val) = J::join(
+            || {
+                evaluate_recursive::<T, J>(
+                    tree,
+                    left_child,
+                    point,
+                    feature_subset,
+                    augmented_tree,
+                    &mut scratch_left,
+                )
+            },
+            || {
+                evaluate_recursive::<T, J>(
+                    tree,
+                    right_child,
+                    point,
+                    feature_subset,
+                    augmented_tree,
+                    &mut scratch_right,
+                )
+            },
+        );
+        Ok(left_val? + right_val?)
     }
 }
 

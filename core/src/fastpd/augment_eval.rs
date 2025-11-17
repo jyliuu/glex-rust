@@ -6,7 +6,8 @@ use crate::fastpd::augment::{augment_tree_rayon, augment_tree_seq};
 use crate::fastpd::augmented_tree::AugmentedTree;
 use crate::fastpd::cache::PDCache;
 use crate::fastpd::error::FastPDError;
-use crate::fastpd::evaluate::evaluate_pd_function;
+use crate::fastpd::evaluate::evaluate_pd_function_rayon;
+use crate::fastpd::evaluate::evaluate_pd_function_seq;
 use crate::fastpd::parallel::ParallelSettings;
 use crate::fastpd::tree::TreeModel;
 use crate::fastpd::types::FeatureSubset;
@@ -30,6 +31,8 @@ pub struct FastPD<T: TreeModel> {
     /// Intercept/base_score term (e.g., from XGBoost)
     /// This is added to predictions but not to PD functions
     intercept: f32,
+    /// Parallelization settings used for both augmentation and evaluation
+    parallel: ParallelSettings,
 }
 
 impl<T: TreeModel> FastPD<T> {
@@ -105,6 +108,7 @@ impl<T: TreeModel> FastPD<T> {
             n_features,
             caches,
             intercept,
+            parallel,
         })
     }
 
@@ -131,6 +135,8 @@ impl<T: TreeModel> FastPD<T> {
     /// for a given feature subset S. The result is the sum of PD contributions
     /// from all trees in the ensemble.
     ///
+    /// Uses the parallelization settings stored in the FastPD instance.
+    ///
     /// # Arguments
     /// * `evaluation_points` - Points at which to evaluate PD
     ///     shape: (n_evaluation_points, n_features)
@@ -148,31 +154,74 @@ impl<T: TreeModel> FastPD<T> {
         feature_subset: &[usize],
     ) -> Result<Array1<f32>, FastPDError> {
         let n_eval = evaluation_points.nrows();
-        let mut results = Vec::with_capacity(n_eval);
 
         // Construct FeatureSubset for S once per batch of evaluation points
         let subset_s = FeatureSubset::from_slice(feature_subset);
 
-        for i in 0..n_eval {
-            let point = evaluation_points.row(i);
-
-            // Validate point dimension
-            if point.len() != self.n_features {
-                return Err(FastPDError::DimensionMismatch(point.len(), self.n_features));
+        let results = if !self.parallel.is_parallel() {
+            // Sequential path: no Rayon anywhere
+            let mut results = Vec::with_capacity(n_eval);
+            for i in 0..n_eval {
+                let point = evaluation_points.row(i);
+                let mut total = 0.0;
+                for (tree_idx, aug_tree) in self.augmented_trees.iter().enumerate() {
+                    let cache = &mut self.caches[tree_idx];
+                    let value = evaluate_pd_function_seq(aug_tree, &point, &subset_s, cache)?;
+                    total += value;
+                }
+                total += self.intercept;
+                results.push(total);
             }
+            results
+        } else {
+            // Parallel path: create thread pool and parallelize across trees
+            let n_threads = self.parallel.n_threads;
+            let pool = ThreadPoolBuilder::new()
+                .num_threads(n_threads)
+                .build()
+                .map_err(|e| FastPDError::ThreadPoolError(e.to_string()))?;
 
-            // Sum contributions from all trees
-            let mut total = 0.0;
-            for (tree_idx, aug_tree) in self.augmented_trees.iter().enumerate() {
-                // Use cache for this tree
-                let cache = &mut self.caches[tree_idx];
+            // Parallelize across trees: each thread processes all evaluation points for one tree
+            // Use Mutex to protect mutable caches during parallel tree evaluation
+            use std::sync::Mutex;
+            let caches_mutex: Vec<Mutex<&mut PDCache>> =
+                self.caches.iter_mut().map(|c| Mutex::new(c)).collect();
 
-                let value = evaluate_pd_function(aug_tree, &point, &subset_s, cache)?;
-                total += value;
+            let tree_results: Result<Vec<Vec<f32>>, FastPDError> = pool.install(|| {
+                self.augmented_trees
+                    .par_iter()
+                    .enumerate()
+                    .map(|(tree_idx, aug_tree)| {
+                        // For this tree, evaluate all evaluation points
+                        let mut tree_values = Vec::with_capacity(n_eval);
+                        for i in 0..n_eval {
+                            let point = evaluation_points.row(i);
+                            let mut cache_guard = caches_mutex[tree_idx].lock().unwrap();
+                            let value = evaluate_pd_function_rayon(
+                                aug_tree,
+                                &point,
+                                &subset_s,
+                                &mut *cache_guard,
+                            )?;
+                            tree_values.push(value);
+                        }
+                        Ok(tree_values)
+                    })
+                    .collect()
+            });
+
+            // Sum across trees for each evaluation point
+            let tree_results = tree_results?;
+            let mut results = Vec::with_capacity(n_eval);
+            for i in 0..n_eval {
+                let mut total = self.intercept;
+                for tree_values in &tree_results {
+                    total += tree_values[i];
+                }
+                results.push(total);
             }
-            total += self.intercept;
-            results.push(total);
-        }
+            results
+        };
 
         Ok(Array1::from_vec(results))
     }
