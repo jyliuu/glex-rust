@@ -212,24 +212,52 @@ where
     }
 }
 
-/// Evaluate v_U(x_U) for multiple subsets U and multiple evaluation points
-/// in one pass through a single augmented tree.
+/// Evaluates v_U(x_U) for multiple subsets U and multiple evaluation points sequentially.
 ///
-/// This function implements the Rcpp `recurseMarginalizeSBitmask` pattern,
-/// evaluating all evaluation points and all feature subsets in a single tree traversal.
+/// This is a thin wrapper around `evaluate_pd_batch_for_subsets_impl::<T, SeqJoin>`.
+pub fn evaluate_pd_batch_for_subsets_seq<T: TreeModel>(
+    augmented_tree: &AugmentedTree<T>,
+    evaluation_points: &ArrayView2<f32>,
+    subsets_u: &[FeatureSubset],
+) -> Result<Array2<f32>, FastPDError> {
+    evaluate_pd_batch_for_subsets_impl::<T, SeqJoin>(augmented_tree, evaluation_points, subsets_u)
+}
+
+/// Evaluates v_U(x_U) for multiple subsets U and multiple evaluation points in parallel.
 ///
-/// # Arguments
-/// * `augmented_tree` - The augmented tree to evaluate
-/// * `evaluation_points` - Evaluation points, shape: [n_eval, n_features]
-/// * `subsets_u` - Vector of feature subsets U to evaluate
-///
-/// # Returns
-/// Matrix of shape [n_eval, n_subsets] where entry (i, j) is v_{U[j]}(x[i])
+/// This is a thin wrapper around `evaluate_pd_batch_for_subsets_impl::<T, RayonJoin>`.
+/// **Important**: This function must be called from within a Rayon thread pool
+/// (via `ThreadPool::install()`) for proper parallel execution.
+pub fn evaluate_pd_batch_for_subsets_rayon<T: TreeModel>(
+    augmented_tree: &AugmentedTree<T>,
+    evaluation_points: &ArrayView2<f32>,
+    subsets_u: &[FeatureSubset],
+) -> Result<Array2<f32>, FastPDError> {
+    evaluate_pd_batch_for_subsets_impl::<T, RayonJoin>(augmented_tree, evaluation_points, subsets_u)
+}
+
+/// Legacy function: delegates to `evaluate_pd_batch_for_subsets_seq` for backward compatibility.
 pub fn evaluate_pd_batch_for_subsets<T: TreeModel>(
     augmented_tree: &AugmentedTree<T>,
     evaluation_points: &ArrayView2<f32>,
     subsets_u: &[FeatureSubset],
 ) -> Result<Array2<f32>, FastPDError> {
+    evaluate_pd_batch_for_subsets_seq(augmented_tree, evaluation_points, subsets_u)
+}
+
+/// Internal implementation of batch evaluation using the Joiner trait.
+///
+/// This function implements the Rcpp `recurseMarginalizeSBitmask` pattern,
+/// evaluating all evaluation points and all feature subsets in a single tree traversal.
+fn evaluate_pd_batch_for_subsets_impl<T, J>(
+    augmented_tree: &AugmentedTree<T>,
+    evaluation_points: &ArrayView2<f32>,
+    subsets_u: &[FeatureSubset],
+) -> Result<Array2<f32>, FastPDError>
+where
+    T: TreeModel,
+    J: Joiner,
+{
     let n_eval = evaluation_points.nrows();
     let n_subsets = subsets_u.len();
     let mut out = Array2::<f32>::zeros((n_eval, n_subsets));
@@ -238,7 +266,7 @@ pub fn evaluate_pd_batch_for_subsets<T: TreeModel>(
     let empty_subset = FeatureSubset::empty();
     let empty_idx = subsets_u.iter().position(|u| u == &empty_subset);
 
-    evaluate_batch_recursive::<T, SeqJoin>(
+    evaluate_batch_recursive::<T, J>(
         augmented_tree,
         augmented_tree.tree.root(),
         evaluation_points,
@@ -323,20 +351,30 @@ where
     let mut mat_yes = Array2::<f32>::zeros((n_eval, n_subsets));
     let mut mat_no = Array2::<f32>::zeros((n_eval, n_subsets));
 
-    evaluate_batch_recursive::<T, J>(
-        augmented_tree,
-        left_child,
-        evaluation_points,
-        subsets_u,
-        &mut mat_yes,
-    )?;
-    evaluate_batch_recursive::<T, J>(
-        augmented_tree,
-        right_child,
-        evaluation_points,
-        subsets_u,
-        &mut mat_no,
-    )?;
+    // Use Joiner trait to parallelize recursive calls to both children
+    // The child evaluations are independent; only the combination logic differs afterward
+    let (left_result, right_result) = J::join(
+        || {
+            evaluate_batch_recursive::<T, J>(
+                augmented_tree,
+                left_child,
+                evaluation_points,
+                subsets_u,
+                &mut mat_yes,
+            )
+        },
+        || {
+            evaluate_batch_recursive::<T, J>(
+                augmented_tree,
+                right_child,
+                evaluation_points,
+                subsets_u,
+                &mut mat_no,
+            )
+        },
+    );
+    left_result?;
+    right_result?;
 
     let feature_col = evaluation_points.column(feature);
     for (j, u) in subsets_u.iter().enumerate() {
@@ -349,23 +387,21 @@ where
             for i in 0..n_eval {
                 col_out[i] += col_yes[i] + col_no[i];
             }
+        } else if T::COMPARISON {
+            for i in 0..n_eval {
+                col_out[i] += if feature_col[i] < threshold {
+                    col_yes[i]
+                } else {
+                    col_no[i]
+                };
+            }
         } else {
-            if T::COMPARISON {
-                for i in 0..n_eval {
-                    col_out[i] += if feature_col[i] < threshold {
-                        col_yes[i]
-                    } else {
-                        col_no[i]
-                    };
-                }
-            } else {
-                for i in 0..n_eval {
-                    col_out[i] += if feature_col[i] <= threshold {
-                        col_yes[i]
-                    } else {
-                        col_no[i]
-                    };
-                }
+            for i in 0..n_eval {
+                col_out[i] += if feature_col[i] <= threshold {
+                    col_yes[i]
+                } else {
+                    col_no[i]
+                };
             }
         }
     }
@@ -389,11 +425,10 @@ pub fn pd_from_u_matrix(
     subsets_u: &[FeatureSubset],
     s: &FeatureSubset,
 ) -> Option<Array1<f32>> {
-    if let Some(idx) = subsets_u.iter().position(|u| u == s) {
-        Some(mat_u.column(idx).to_owned())
-    } else {
-        None
-    }
+    subsets_u
+        .iter()
+        .position(|u| u == s)
+        .map(|idx| mat_u.column(idx).to_owned())
 }
 
 /// Given v_U(x) = E[m(X) | X_U = x_U] for all U in `subsets_u`,
@@ -427,7 +462,7 @@ pub fn functional_component_from_u_matrix(
     // Enumerate all V ⊆ S and combine v_V(x) with ±1 coefficients
     for v in s.all_subsets() {
         if let Some(&idx) = u_to_idx.get(&v) {
-            let sign = if (s.len() - v.len()) % 2 == 0 {
+            let sign = if (s.len() - v.len()).is_multiple_of(2) {
                 1.0
             } else {
                 -1.0
