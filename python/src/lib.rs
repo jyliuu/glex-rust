@@ -8,9 +8,9 @@ use numpy::{PyArray1, PyReadonlyArray2};
 use pyo3::prelude::*;
 use pyo3::types::PyType;
 
-use glex_core::FastPD;
 use crate::xgboost::extract_trees_from_xgboost;
 use crate::xgboost::types::XGBoostTreeModel;
+use glex_core::FastPD;
 
 /// Python-facing wrapper for XGBoost tree extraction.
 ///
@@ -45,12 +45,15 @@ impl FastPDPy {
     /// * `model` - XGBoost model (Booster or XGBModel)
     /// * `background_samples` - Background samples for PD estimation
     ///     shape: (n_background, n_features)
+    /// * `n_threads` - Number of threads to use for parallelization (default: 1)
     #[classmethod]
+    #[pyo3(signature = (model, background_samples, n_threads = 1))]
     fn from_xgboost(
         _cls: &Bound<'_, PyType>,
         _py: Python<'_>,
         model: Bound<'_, PyAny>,
         background_samples: PyReadonlyArray2<f64>,
+        n_threads: usize,
     ) -> PyResult<Self> {
         // Extract trees and base_score from XGBoost model
         let (trees, base_score) = extract_trees_from_xgboost(&model)?;
@@ -60,7 +63,13 @@ impl FastPDPy {
         let background_f32: ndarray::Array2<f32> = background_f64.mapv(|x| x as f32);
 
         // Create FastPD instance with intercept
-        let fastpd = FastPD::new(trees, &background_f32.view(), base_score, ParallelSettings::sequential()).map_err(|e| {
+        let fastpd = FastPD::new(
+            trees,
+            &background_f32.view(),
+            base_score,
+            ParallelSettings::with_n_threads(n_threads),
+        )
+        .map_err(|e| {
             PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("FastPD error: {}", e))
         })?;
 
