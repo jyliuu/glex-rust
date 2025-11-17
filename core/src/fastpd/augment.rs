@@ -1,7 +1,7 @@
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use ndarray::ArrayView2;
+use rustc_hash::FxHashMap;
 
 use crate::fastpd::error::FastPDError;
 use crate::fastpd::parallel::{Joiner, RayonJoin, SeqJoin};
@@ -28,7 +28,7 @@ pub fn augment_tree_seq<T: TreeModel>(
 
     let all_indices: Vec<usize> = (0..n_background).collect();
     let initial_set: SharedObservationSet = Arc::new(ObservationSet::Indices(all_indices));
-    let mut initial_path_data = PathData::new();
+    let mut initial_path_data = PathData::default();
     initial_path_data.insert(FeatureSubset::empty(), initial_set);
 
     let (path_features, path_data) = augment_recursive::<T, SeqJoin>(
@@ -76,7 +76,7 @@ pub fn augment_tree_rayon<T: TreeModel>(
 
     let all_indices: Vec<usize> = (0..n_background).collect();
     let initial_set: SharedObservationSet = Arc::new(ObservationSet::Indices(all_indices));
-    let mut initial_path_data = PathData::new();
+    let mut initial_path_data = PathData::default();
     initial_path_data.insert(FeatureSubset::empty(), initial_set);
 
     let (path_features, path_data) = augment_recursive::<T, RayonJoin>(
@@ -127,15 +127,15 @@ fn augment_recursive<T, J>(
     current_path_data: PathData,          // P
     background_samples: &ArrayView2<f32>,
     n_features: usize,
-) -> Result<(HashMap<usize, FeatureSubset>, HashMap<usize, PathData>), FastPDError>
+) -> Result<(FxHashMap<usize, FeatureSubset>, FxHashMap<usize, PathData>), FastPDError>
 where
     T: TreeModel,
     J: Joiner,
 {
     if tree.is_leaf(node_id) {
         // Store T_j and P_j for this leaf
-        let mut path_features = HashMap::new();
-        let mut path_data = HashMap::new();
+        let mut path_features = FxHashMap::default();
+        let mut path_data = FxHashMap::default();
         path_features.insert(node_id, current_path_features);
         path_data.insert(node_id, current_path_data);
         return Ok((path_features, path_data));
@@ -169,8 +169,8 @@ where
         current_path_data.into_iter().collect();
 
     // Build P_yes and P_no for children
-    let mut path_data_yes = PathData::new();
-    let mut path_data_no = PathData::new();
+    let mut path_data_yes = PathData::default();
+    let mut path_data_no = PathData::default();
 
     // Process each (S, D_S) in P
     for (subset_s, shared_obs_set) in original_path_data.iter() {

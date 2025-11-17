@@ -1,7 +1,7 @@
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use ndarray::ArrayView2;
+use rustc_hash::FxHashMap;
 
 use crate::fastpd::tree::{FeatureIndex, Threshold};
 
@@ -450,7 +450,7 @@ pub type SharedObservationSet = Arc<ObservationSet>;
 ///
 /// For each leaf j, this stores the observation sets D_S for each feature subset S
 /// encountered on the path from root to leaf j.
-pub type PathData = HashMap<FeatureSubset, SharedObservationSet>;
+pub type PathData = FxHashMap<FeatureSubset, SharedObservationSet>;
 
 #[cfg(test)]
 mod tests {

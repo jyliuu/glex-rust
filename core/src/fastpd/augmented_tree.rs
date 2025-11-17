@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 
 use crate::fastpd::tree::TreeModel;
 use crate::fastpd::types::{FeatureSubset, PathData};
@@ -22,9 +22,9 @@ pub struct AugmentedTree<T: TreeModel> {
     /// The original tree model.
     pub tree: T,
     /// Maps leaf node ID -> path features T_j (sorted, deduplicated feature indices).
-    pub path_features: HashMap<usize, FeatureSubset>,
+    pub path_features: FxHashMap<usize, FeatureSubset>,
     /// Maps leaf node ID -> path data P_j.
-    pub path_data: HashMap<usize, PathData>,
+    pub path_data: FxHashMap<usize, PathData>,
     /// Number of background samples used for augmentation.
     pub n_background: usize,
     /// Union of all path features across leaves: U_T = ⋃_j T_j.
@@ -47,8 +47,8 @@ impl<T: TreeModel> AugmentedTree<T> {
     pub fn new(
         tree: T,
         n_background: usize,
-        path_features: HashMap<usize, FeatureSubset>,
-        path_data: HashMap<usize, PathData>,
+        path_features: FxHashMap<usize, FeatureSubset>,
+        path_data: FxHashMap<usize, PathData>,
         all_tree_features: FeatureSubset,
     ) -> Self {
         Self {
@@ -145,8 +145,8 @@ mod tests {
         let aug_tree = AugmentedTree::new(
             tree,
             100,
-            HashMap::new(),
-            HashMap::new(),
+            FxHashMap::default(),
+            FxHashMap::default(),
             FeatureSubset::empty(),
         );
 
@@ -157,11 +157,16 @@ mod tests {
     #[test]
     fn test_augmented_tree_path_features() {
         let tree = create_simple_tree();
-        let mut path_features = HashMap::new();
+        let mut path_features = FxHashMap::default();
         let features = FeatureSubset::new(vec![0]);
         path_features.insert(1, features.clone());
-        let aug_tree =
-            AugmentedTree::new(tree, 100, path_features, HashMap::new(), features.clone());
+        let aug_tree = AugmentedTree::new(
+            tree,
+            100,
+            path_features,
+            FxHashMap::default(),
+            features.clone(),
+        );
 
         assert_eq!(aug_tree.get_path_features(1), Some(&features));
         assert_eq!(aug_tree.num_leaves(), 1);
@@ -170,8 +175,8 @@ mod tests {
     #[test]
     fn test_augmented_tree_path_data() {
         let tree = create_simple_tree();
-        let mut path_data_map = HashMap::new();
-        let mut path_data = HashMap::new();
+        let mut path_data_map = FxHashMap::default();
+        let mut path_data = FxHashMap::default();
         let empty_subset = FeatureSubset::empty();
         let obs_set: SharedObservationSet = Arc::new(ObservationSet::all(100));
         path_data.insert(empty_subset.clone(), obs_set.clone());
@@ -179,7 +184,7 @@ mod tests {
         let aug_tree = AugmentedTree::new(
             tree,
             100,
-            HashMap::new(),
+            FxHashMap::default(),
             path_data_map,
             FeatureSubset::empty(),
         );
