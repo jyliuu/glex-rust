@@ -1,4 +1,4 @@
-use ndarray::{Array1, ArrayView2};
+use ndarray::{Array1, Array2, ArrayView2};
 use rayon::prelude::*;
 use rayon::ThreadPoolBuilder;
 
@@ -6,8 +6,10 @@ use crate::fastpd::augment::{augment_tree_rayon, augment_tree_seq};
 use crate::fastpd::augmented_tree::AugmentedTree;
 use crate::fastpd::cache::PDCache;
 use crate::fastpd::error::FastPDError;
-use crate::fastpd::evaluate::evaluate_pd_function_rayon;
-use crate::fastpd::evaluate::evaluate_pd_function_seq;
+use crate::fastpd::evaluate::{
+    evaluate_pd_batch_for_subsets, evaluate_pd_function_rayon, evaluate_pd_function_seq,
+    functional_component_from_u_matrix, pd_from_u_matrix,
+};
 use crate::fastpd::parallel::ParallelSettings;
 use crate::fastpd::tree::TreeModel;
 use crate::fastpd::types::FeatureSubset;
@@ -298,6 +300,145 @@ impl<T: TreeModel> FastPD<T> {
     pub fn n_features(&self) -> usize {
         self.n_features
     }
+
+    /// Compute plain partial dependence surfaces v_S(x_S)
+    /// for all subsets S with 1 <= |S| <= max_order.
+    ///
+    /// This function efficiently computes all PD surfaces up to a given order
+    /// by batch-evaluating all subsets in a single pass through each tree.
+    ///
+    /// # Arguments
+    /// * `evaluation_points` - Points at which to evaluate PD
+    ///     shape: (n_evaluation_points, n_features)
+    /// * `max_order` - Maximum interaction order (e.g., 1 for main effects, 2 for pairwise, etc.)
+    ///
+    /// # Returns
+    /// A tuple `(pd_values, subsets)` where:
+    /// - `pd_values`: Matrix of shape [n_eval, n_subsets] with one column per subset S
+    /// - `subsets`: Vector of FeatureSubset corresponding to each column
+    ///
+    /// # Errors
+    /// Returns `FastPDError` if evaluation fails
+    pub fn pd_functions_up_to_order(
+        &mut self,
+        evaluation_points: &ArrayView2<f32>,
+        max_order: usize,
+    ) -> Result<(Array2<f32>, Vec<FeatureSubset>), FastPDError> {
+        let n_eval = evaluation_points.nrows();
+
+        // 1. Union of encountered features across trees
+        let mut all_encountered = FeatureSubset::empty();
+        for aug_tree in &self.augmented_trees {
+            let feats_vec = aug_tree.all_tree_features.as_slice();
+            all_encountered = all_encountered.union(&feats_vec);
+        }
+
+        // 2. Build U = all subsets of all_encountered with |U| <= max_order
+        let subsets_u = all_encountered.subsets_up_to_order(max_order);
+        let n_subsets_u = subsets_u.len();
+
+        // 3. Aggregate v_U(x) across trees
+        let mut mat_u = Array2::<f32>::zeros((n_eval, n_subsets_u));
+        for aug_tree in &self.augmented_trees {
+            let tree_mat = evaluate_pd_batch_for_subsets(aug_tree, evaluation_points, &subsets_u)?;
+            mat_u = &mat_u + &tree_mat;
+        }
+
+        // 4. Extract v_S(x_S) for all S with 1 <= |S| <= max_order
+        // Precompute which subsets we need to extract
+        let target_subsets: Vec<FeatureSubset> = all_encountered
+            .subsets_up_to_order(max_order)
+            .into_iter()
+            .filter(|s| !s.is_empty())
+            .collect();
+
+        // Preallocate result matrix
+        let n_target_subsets = target_subsets.len();
+        let mut pd_mat = Array2::<f32>::zeros((n_eval, n_target_subsets));
+        let mut pd_subsets = Vec::with_capacity(n_target_subsets);
+
+        for (col_idx, s) in target_subsets.iter().enumerate() {
+            if let Some(col) = pd_from_u_matrix(&mat_u, &subsets_u, s) {
+                pd_mat.column_mut(col_idx).assign(&col);
+                pd_subsets.push(s.clone());
+            }
+        }
+
+        // Add intercept to all columns
+        for mut col in pd_mat.columns_mut() {
+            for val in col.iter_mut() {
+                *val += self.intercept;
+            }
+        }
+
+        Ok((pd_mat, pd_subsets))
+    }
+
+    /// Compute functional decomposition components f_S(x_S)
+    /// for all subsets S with 1 <= |S| <= max_order.
+    ///
+    /// This function computes the ANOVA functional decomposition components
+    /// via inclusion–exclusion, sharing the same intermediate v_U(x) computation
+    /// as `pd_functions_up_to_order`.
+    ///
+    /// # Arguments
+    /// * `evaluation_points` - Points at which to evaluate
+    ///     shape: (n_evaluation_points, n_features)
+    /// * `max_order` - Maximum interaction order
+    ///
+    /// # Returns
+    /// A tuple `(comp_values, subsets)` where:
+    /// - `comp_values`: Matrix of shape [n_eval, n_subsets] with one column per component f_S
+    /// - `subsets`: Vector of FeatureSubset corresponding to each column
+    ///
+    /// # Errors
+    /// Returns `FastPDError` if evaluation fails
+    pub fn functional_decomp_up_to_order(
+        &mut self,
+        evaluation_points: &ArrayView2<f32>,
+        max_order: usize,
+    ) -> Result<(Array2<f32>, Vec<FeatureSubset>), FastPDError> {
+        let n_eval = evaluation_points.nrows();
+
+        // 1. Union of encountered features across trees
+        let mut all_encountered = FeatureSubset::empty();
+        for aug_tree in &self.augmented_trees {
+            let feats_vec = aug_tree.all_tree_features.as_slice();
+            all_encountered = all_encountered.union(&feats_vec);
+        }
+
+        // 2. Build U = all subsets of all_encountered with |U| <= max_order
+        let subsets_u = all_encountered.subsets_up_to_order(max_order);
+        let n_subsets_u = subsets_u.len();
+
+        // 3. Aggregate v_U(x) across trees
+        let mut mat_u = Array2::<f32>::zeros((n_eval, n_subsets_u));
+        for aug_tree in &self.augmented_trees {
+            let tree_mat = evaluate_pd_batch_for_subsets(aug_tree, evaluation_points, &subsets_u)?;
+            mat_u = &mat_u + &tree_mat;
+        }
+
+        // 4. Derive f_S(x_S) for all S with 1 <= |S| <= max_order via inclusion–exclusion
+        let target_subsets: Vec<FeatureSubset> = all_encountered
+            .subsets_up_to_order(max_order)
+            .into_iter()
+            .filter(|s| !s.is_empty())
+            .collect();
+
+        let n_target_subsets = target_subsets.len();
+        let mut comp_mat = Array2::<f32>::zeros((n_eval, n_target_subsets));
+        let mut comp_subsets = Vec::with_capacity(n_target_subsets);
+
+        for (col_idx, s) in target_subsets.iter().enumerate() {
+            let col = functional_component_from_u_matrix(&mat_u, &subsets_u, s);
+            comp_mat.column_mut(col_idx).assign(&col);
+            comp_subsets.push(s.clone());
+        }
+
+        // Note: intercept is not added to functional components (they sum to the prediction)
+
+        Ok((comp_mat, comp_subsets))
+    }
 }
 
 #[cfg(test)]
@@ -425,5 +566,142 @@ mod tests {
 
         // Caches should be empty
         assert!(fastpd.caches[0].is_empty());
+    }
+
+    /// Create a tree with 2 features for testing multiple subsets
+    fn create_two_feature_tree() -> Tree {
+        // Tree structure:
+        // Root splits on feature 0 at 0.5
+        //   Left child splits on feature 1 at 0.5 -> leaf value 1.0
+        //   Right child splits on feature 1 at 0.5 -> leaf value 2.0
+        let nodes = vec![
+            TreeNode {
+                internal_idx: 0,
+                feature: Some(0),
+                threshold: Some(0.5),
+                left: Some(1),
+                right: Some(2),
+                missing: Some(1),
+                leaf_value: None,
+            },
+            TreeNode {
+                internal_idx: 1,
+                feature: Some(1),
+                threshold: Some(0.5),
+                left: Some(3),
+                right: Some(4),
+                missing: Some(3),
+                leaf_value: None,
+            },
+            TreeNode {
+                internal_idx: 2,
+                feature: Some(1),
+                threshold: Some(0.5),
+                left: Some(5),
+                right: Some(6),
+                missing: Some(5),
+                leaf_value: None,
+            },
+            TreeNode {
+                internal_idx: 3,
+                feature: None,
+                threshold: None,
+                left: None,
+                right: None,
+                missing: None,
+                leaf_value: Some(1.0),
+            },
+            TreeNode {
+                internal_idx: 4,
+                feature: None,
+                threshold: None,
+                left: None,
+                right: None,
+                missing: None,
+                leaf_value: Some(2.0),
+            },
+            TreeNode {
+                internal_idx: 5,
+                feature: None,
+                threshold: None,
+                left: None,
+                right: None,
+                missing: None,
+                leaf_value: Some(3.0),
+            },
+            TreeNode {
+                internal_idx: 6,
+                feature: None,
+                threshold: None,
+                left: None,
+                right: None,
+                missing: None,
+                leaf_value: Some(4.0),
+            },
+        ];
+        Tree::new(nodes, 0)
+    }
+
+    #[test]
+    fn test_pd_functions_up_to_order_matches_individual_calls() {
+        let tree = create_two_feature_tree();
+        // Create background data with 2 features
+        let background = arr2(&[
+            [0.3, 0.3],
+            [0.3, 0.7],
+            [0.7, 0.3],
+            [0.7, 0.7],
+            [0.2, 0.2],
+            [0.8, 0.8],
+        ]);
+        let background_view = background.view();
+
+        let mut fastpd = FastPD::new_sequential(vec![tree], &background_view, 0.0).unwrap();
+
+        // Create multiple evaluation points
+        let eval_points = arr2(&[[0.3, 0.3], [0.7, 0.7], [0.4, 0.6]]);
+        let eval_view = eval_points.view();
+
+        // Test with max_order = 2 (should include {0}, {1}, {0,1})
+        let max_order = 2;
+        let (batch_pd_values, batch_subsets) = fastpd
+            .pd_functions_up_to_order(&eval_view, max_order)
+            .unwrap();
+
+        // Verify we got the expected number of subsets
+        // For 2 features with max_order=2, we should get:
+        // - {0} (order 1)
+        // - {1} (order 1)
+        // - {0,1} (order 2)
+        assert_eq!(batch_subsets.len(), 3);
+        assert_eq!(batch_pd_values.nrows(), 3); // 3 evaluation points
+        assert_eq!(batch_pd_values.ncols(), 3); // 3 subsets
+
+        // Now compare with individual pd_function calls
+        for (subset_idx, subset) in batch_subsets.iter().enumerate() {
+            let subset_features = subset.as_slice();
+
+            for (point_idx, point_row) in eval_points.rows().into_iter().enumerate() {
+                // Call pd_function for this single point and subset
+                let single_point = point_row.to_owned().insert_axis(ndarray::Axis(0));
+                let single_point_view = single_point.view();
+                let individual_result = fastpd
+                    .pd_function(&single_point_view, &subset_features)
+                    .unwrap();
+
+                // Compare with batch result
+                let batch_value = batch_pd_values[[point_idx, subset_idx]];
+                let individual_value = individual_result[0];
+
+                assert!(
+                    (batch_value - individual_value).abs() < 1e-6,
+                    "Mismatch for subset {:?} at point {}: batch={}, individual={}",
+                    subset_features,
+                    point_idx,
+                    batch_value,
+                    individual_value
+                );
+            }
+        }
     }
 }
