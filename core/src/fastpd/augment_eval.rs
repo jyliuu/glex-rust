@@ -7,9 +7,7 @@ use crate::fastpd::augmented_tree::AugmentedTree;
 use crate::fastpd::cache::PDCache;
 use crate::fastpd::error::FastPDError;
 use crate::fastpd::evaluate::{
-    evaluate_pd_batch_for_subsets_rayon, evaluate_pd_batch_for_subsets_seq,
-    evaluate_pd_function_rayon, evaluate_pd_function_seq, functional_component_from_u_matrix,
-    pd_from_u_matrix,
+    aggregate_v_u_across_trees, functional_component_from_u_matrix, pd_from_u_matrix,
 };
 use crate::fastpd::parallel::ParallelSettings;
 use crate::fastpd::tree::TreeModel;
@@ -85,6 +83,7 @@ impl<T: TreeModel> FastPD<T> {
             augmented_trees
         } else {
             // Parallel path: create thread pool and parallelize
+            // TODO: save this pool so we don't create a new one every time
             let n_threads = parallel.n_threads;
             let pool = ThreadPoolBuilder::new()
                 .num_threads(n_threads)
@@ -156,77 +155,24 @@ impl<T: TreeModel> FastPD<T> {
         evaluation_points: &ArrayView2<f32>,
         feature_subset: &[usize],
     ) -> Result<Array1<f32>, FastPDError> {
-        let n_eval = evaluation_points.nrows();
-
-        // Construct FeatureSubset for S once per batch of evaluation points
+        // Construct FeatureSubset for S
         let subset_s = FeatureSubset::from_slice(feature_subset);
+        let subsets_u = vec![subset_s];
 
-        let results = if !self.parallel.is_parallel() {
-            // Sequential path: no Rayon anywhere
-            let mut results = Vec::with_capacity(n_eval);
-            for i in 0..n_eval {
-                let point = evaluation_points.row(i);
-                let mut total = 0.0;
-                for (tree_idx, aug_tree) in self.augmented_trees.iter().enumerate() {
-                    let cache = &mut self.caches[tree_idx];
-                    let value = evaluate_pd_function_seq(aug_tree, &point, &subset_s, cache)?;
-                    total += value;
-                }
-                total += self.intercept;
-                results.push(total);
-            }
-            results
-        } else {
-            // Parallel path: create thread pool and parallelize across trees
-            let n_threads = self.parallel.n_threads;
-            let pool = ThreadPoolBuilder::new()
-                .num_threads(n_threads)
-                .build()
-                .map_err(|e| FastPDError::ThreadPoolError(e.to_string()))?;
+        // Use batch evaluation to aggregate across trees
+        // This is more efficient than evaluating point-by-point
+        let mat_u = aggregate_v_u_across_trees(
+            &self.augmented_trees,
+            evaluation_points,
+            &subsets_u,
+            self.parallel,
+        )?;
 
-            // Parallelize across trees: each thread processes all evaluation points for one tree
-            // Use Mutex to protect mutable caches during parallel tree evaluation
-            use std::sync::Mutex;
-            let caches_mutex: Vec<Mutex<&mut PDCache>> =
-                self.caches.iter_mut().map(|c| Mutex::new(c)).collect();
+        // Extract the single column and add intercept
+        let mut result = mat_u.column(0).to_owned();
+        result += self.intercept;
 
-            let tree_results: Result<Vec<Vec<f32>>, FastPDError> = pool.install(|| {
-                self.augmented_trees
-                    .par_iter()
-                    .enumerate()
-                    .map(|(tree_idx, aug_tree)| {
-                        // For this tree, evaluate all evaluation points
-                        let mut tree_values = Vec::with_capacity(n_eval);
-                        for i in 0..n_eval {
-                            let point = evaluation_points.row(i);
-                            let mut cache_guard = caches_mutex[tree_idx].lock().unwrap();
-                            let value = evaluate_pd_function_rayon(
-                                aug_tree,
-                                &point,
-                                &subset_s,
-                                &mut *cache_guard,
-                            )?;
-                            tree_values.push(value);
-                        }
-                        Ok(tree_values)
-                    })
-                    .collect()
-            });
-
-            // Sum across trees for each evaluation point
-            let tree_results = tree_results?;
-            let mut results = Vec::with_capacity(n_eval);
-            for i in 0..n_eval {
-                let mut total = self.intercept;
-                for tree_values in &tree_results {
-                    total += tree_values[i];
-                }
-                results.push(total);
-            }
-            results
-        };
-
-        Ok(Array1::from_vec(results))
+        Ok(result)
     }
 
     /// Predicts the output for given input points by summing predictions from all trees.
@@ -302,6 +248,45 @@ impl<T: TreeModel> FastPD<T> {
         self.n_features
     }
 
+    /// Helper function to compute the aggregated v_U(x) matrix for all subsets U.
+    ///
+    /// This function performs steps 1-3 that are common to both
+    /// `pd_functions_up_to_order` and `functional_decomp_up_to_order`:
+    /// 1. Union of encountered features across trees
+    /// 2. Build U = all subsets of all_encountered with |U| <= max_order
+    /// 3. Aggregate v_U(x) across trees
+    ///
+    /// # Returns
+    /// A tuple `(mat_u, subsets_u, all_encountered)` where:
+    /// - `mat_u`: Matrix of shape [n_eval, n_subsets_u] containing aggregated v_U(x) values
+    /// - `subsets_u`: Vector of feature subsets U corresponding to columns
+    /// - `all_encountered`: Union of all features encountered across trees
+    fn compute_mat_u_up_to_order(
+        &mut self,
+        evaluation_points: &ArrayView2<f32>,
+        max_order: usize,
+    ) -> Result<(Array2<f32>, Vec<FeatureSubset>, FeatureSubset), FastPDError> {
+        // 1. Union of encountered features across trees
+        let mut all_encountered = FeatureSubset::empty();
+        for aug_tree in &self.augmented_trees {
+            let feats_vec = aug_tree.all_tree_features.as_slice();
+            all_encountered = all_encountered.union(&feats_vec);
+        }
+
+        // 2. Build U = all subsets of all_encountered with |U| <= max_order
+        let subsets_u = all_encountered.subsets_up_to_order(max_order);
+
+        // 3. Aggregate v_U(x) across trees
+        let mat_u = aggregate_v_u_across_trees(
+            &self.augmented_trees,
+            evaluation_points,
+            &subsets_u,
+            self.parallel,
+        )?;
+
+        Ok((mat_u, subsets_u, all_encountered))
+    }
+
     /// Compute plain partial dependence surfaces v_S(x_S)
     /// for all subsets S with 1 <= |S| <= max_order.
     ///
@@ -327,50 +312,9 @@ impl<T: TreeModel> FastPD<T> {
     ) -> Result<(Array2<f32>, Vec<FeatureSubset>), FastPDError> {
         let n_eval = evaluation_points.nrows();
 
-        // 1. Union of encountered features across trees
-        let mut all_encountered = FeatureSubset::empty();
-        for aug_tree in &self.augmented_trees {
-            let feats_vec = aug_tree.all_tree_features.as_slice();
-            all_encountered = all_encountered.union(&feats_vec);
-        }
-
-        // 2. Build U = all subsets of all_encountered with |U| <= max_order
-        let subsets_u = all_encountered.subsets_up_to_order(max_order);
-        let n_subsets_u = subsets_u.len();
-
-        // 3. Aggregate v_U(x) across trees
-        let mat_u = if !self.parallel.is_parallel() {
-            // Sequential path: no Rayon anywhere
-            let mut mat_u = Array2::<f32>::zeros((n_eval, n_subsets_u));
-            for aug_tree in &self.augmented_trees {
-                let tree_mat =
-                    evaluate_pd_batch_for_subsets_seq(aug_tree, evaluation_points, &subsets_u)?;
-                mat_u = &mat_u + &tree_mat;
-            }
-            mat_u
-        } else {
-            // Parallel path: create thread pool and parallelize across trees
-            let n_threads = self.parallel.n_threads;
-            let pool = ThreadPoolBuilder::new()
-                .num_threads(n_threads)
-                .build()
-                .map_err(|e| FastPDError::ThreadPoolError(e.to_string()))?;
-
-            pool.install(|| {
-                self.augmented_trees
-                    .par_iter()
-                    .map(|aug_tree| {
-                        evaluate_pd_batch_for_subsets_rayon(aug_tree, evaluation_points, &subsets_u)
-                    })
-                    .try_reduce(
-                        || Array2::<f32>::zeros((n_eval, n_subsets_u)),
-                        |mut a, b| {
-                            a = &a + &b;
-                            Ok(a)
-                        },
-                    )
-            })?
-        };
+        // Compute aggregated v_U(x) matrix (steps 1-3)
+        let (mat_u, subsets_u, all_encountered) =
+            self.compute_mat_u_up_to_order(evaluation_points, max_order)?;
 
         // 4. Extract v_S(x_S) for all S with 1 <= |S| <= max_order
         // Precompute which subsets we need to extract
@@ -428,52 +372,11 @@ impl<T: TreeModel> FastPD<T> {
     ) -> Result<(Array2<f32>, Vec<FeatureSubset>), FastPDError> {
         let n_eval = evaluation_points.nrows();
 
-        // 1. Union of encountered features across trees
-        let mut all_encountered = FeatureSubset::empty();
-        for aug_tree in &self.augmented_trees {
-            let feats_vec = aug_tree.all_tree_features.as_slice();
-            all_encountered = all_encountered.union(&feats_vec);
-        }
-
-        // 2. Build U = all subsets of all_encountered with |U| <= max_order
-        let subsets_u = all_encountered.subsets_up_to_order(max_order);
-        let n_subsets_u = subsets_u.len();
-
-        // 3. Aggregate v_U(x) across trees
+        // Compute aggregated v_U(x) matrix (steps 1-3)
         // evaluate_pd_batch_for_subsets populates v_∅ with each tree's expected value
         // NOTE: Do NOT add intercept to v_∅ here - it will be added to f_∅ after inclusion-exclusion
-        let mat_u = if !self.parallel.is_parallel() {
-            // Sequential path: no Rayon anywhere
-            let mut mat_u = Array2::<f32>::zeros((n_eval, n_subsets_u));
-            for aug_tree in &self.augmented_trees {
-                let tree_mat =
-                    evaluate_pd_batch_for_subsets_seq(aug_tree, evaluation_points, &subsets_u)?;
-                mat_u = &mat_u + &tree_mat;
-            }
-            mat_u
-        } else {
-            // Parallel path: create thread pool and parallelize across trees
-            let n_threads = self.parallel.n_threads;
-            let pool = ThreadPoolBuilder::new()
-                .num_threads(n_threads)
-                .build()
-                .map_err(|e| FastPDError::ThreadPoolError(e.to_string()))?;
-
-            pool.install(|| {
-                self.augmented_trees
-                    .par_iter()
-                    .map(|aug_tree| {
-                        evaluate_pd_batch_for_subsets_rayon(aug_tree, evaluation_points, &subsets_u)
-                    })
-                    .try_reduce(
-                        || Array2::<f32>::zeros((n_eval, n_subsets_u)),
-                        |mut a, b| {
-                            a = &a + &b;
-                            Ok(a)
-                        },
-                    )
-            })?
-        };
+        let (mat_u, subsets_u, all_encountered) =
+            self.compute_mat_u_up_to_order(evaluation_points, max_order)?;
 
         // 4. Derive f_S(x_S) for all S with 0 <= |S| <= max_order via inclusion–exclusion
         let target_subsets: Vec<FeatureSubset> = all_encountered

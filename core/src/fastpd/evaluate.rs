@@ -1,7 +1,9 @@
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
+use rayon::prelude::*;
+use rayon::ThreadPoolBuilder;
 
 use crate::fastpd::error::FastPDError;
-use crate::fastpd::parallel::{Joiner, RayonJoin, SeqJoin};
+use crate::fastpd::parallel::{Joiner, ParallelSettings, RayonJoin, SeqJoin};
 use crate::fastpd::tree::TreeModel;
 use crate::fastpd::types::FeatureSubset;
 
@@ -281,6 +283,66 @@ where
     }
 
     Ok(out)
+}
+
+/// Aggregates v_U(x) across multiple augmented trees.
+///
+/// This is a pure function that computes the sum of v_U(x) contributions
+/// from all trees in the ensemble. It handles both sequential and parallel
+/// execution based on the provided `ParallelSettings`.
+///
+/// # Arguments
+/// * `augmented_trees` - Slice of augmented trees to aggregate
+/// * `evaluation_points` - Evaluation points, shape: [n_eval, n_features]
+/// * `subsets_u` - Vector of feature subsets U to evaluate
+/// * `parallel` - Parallelization settings
+///
+/// # Returns
+/// Matrix of shape [n_eval, n_subsets] containing aggregated v_U(x) values
+///
+/// # Errors
+/// Returns `FastPDError` if evaluation fails
+pub fn aggregate_v_u_across_trees<T: TreeModel>(
+    augmented_trees: &[AugmentedTree<T>],
+    evaluation_points: &ArrayView2<f32>,
+    subsets_u: &[FeatureSubset],
+    parallel: ParallelSettings,
+) -> Result<Array2<f32>, FastPDError> {
+    let n_eval = evaluation_points.nrows();
+    let n_subsets_u = subsets_u.len();
+
+    if !parallel.is_parallel() {
+        // Sequential path: no Rayon anywhere
+        let mut mat_u = Array2::<f32>::zeros((n_eval, n_subsets_u));
+        for aug_tree in augmented_trees {
+            let tree_mat =
+                evaluate_pd_batch_for_subsets_seq(aug_tree, evaluation_points, subsets_u)?;
+            mat_u = &mat_u + &tree_mat;
+        }
+        Ok(mat_u)
+    } else {
+        // Parallel path: create thread pool and parallelize across trees
+        let n_threads = parallel.n_threads;
+        let pool = ThreadPoolBuilder::new()
+            .num_threads(n_threads)
+            .build()
+            .map_err(|e| FastPDError::ThreadPoolError(e.to_string()))?;
+
+        pool.install(|| {
+            augmented_trees
+                .par_iter()
+                .map(|aug_tree| {
+                    evaluate_pd_batch_for_subsets_rayon(aug_tree, evaluation_points, subsets_u)
+                })
+                .try_reduce(
+                    || Array2::<f32>::zeros((n_eval, n_subsets_u)),
+                    |mut a, b| {
+                        a = &a + &b;
+                        Ok(a)
+                    },
+                )
+        })
+    }
 }
 
 /// Recursive helper function for batch evaluation.
