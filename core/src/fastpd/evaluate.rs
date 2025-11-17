@@ -127,17 +127,12 @@ where
         // Compute U_j into a reusable scratch subset to avoid per-leaf allocations
         feature_subset.intersect_with_into(path_features, scratch_subset);
 
-        // Get precomputed probability for U_j
-        let prob = augmented_tree
-            .precomputed_prob(node_id, scratch_subset)
+        // Get precomputed expectation for U_j (already includes leaf_value * prob)
+        let expectation = augmented_tree
+            .precomputed_expectation(node_id, scratch_subset)
             .ok_or(FastPDError::MissingObservationSet)?;
 
-        // Get leaf value
-        let leaf_value = tree
-            .leaf_value(node_id)
-            .ok_or_else(|| FastPDError::InvalidTree("Leaf missing value".into()))?;
-
-        return Ok(leaf_value * prob);
+        return Ok(expectation);
     }
 
     // Get node information
@@ -266,10 +261,6 @@ where
     let tree = &augmented_tree.tree;
 
     if tree.is_leaf(node_id) {
-        let leaf_value = tree
-            .leaf_value(node_id)
-            .ok_or_else(|| FastPDError::InvalidTree("Leaf missing value".into()))?;
-
         let path_features = augmented_tree
             .path_features
             .get(&node_id)
@@ -282,14 +273,13 @@ where
             // U_j = U ∩ T_j
             u.intersect_with_into(path_features, &mut scratch_subset);
 
-            let prob = augmented_tree
-                .precomputed_prob(node_id, &scratch_subset)
+            let expectation = augmented_tree
+                .precomputed_expectation(node_id, &scratch_subset)
                 .ok_or(FastPDError::MissingObservationSet)?;
 
-            let val = leaf_value * prob;
             let mut col = out.column_mut(j);
             for i in 0..n_eval {
-                col[i] += val;
+                col[i] += expectation;
             }
         }
         return Ok(());

@@ -1,7 +1,7 @@
 use rustc_hash::FxHashMap;
 
 use crate::fastpd::tree::TreeModel;
-use crate::fastpd::types::{FeatureSubset, LeafProbabilities, PathData};
+use crate::fastpd::types::{FeatureSubset, LeafExpectations, PathData};
 
 /// Augmented tree storing path features and path data for each leaf.
 ///
@@ -33,11 +33,11 @@ pub struct AugmentedTree<T: TreeModel> {
     /// v_S(x_S) does not need to recompute the union of all path features
     /// for every query.
     pub all_tree_features: FeatureSubset,
-    /// Precomputed probabilities for each leaf: leaf_id -> (FeatureSubset -> probability).
+    /// Precomputed expectations for each leaf: leaf_id -> (FeatureSubset -> expectation).
     ///
-    /// For each leaf j and feature subset S, stores |D_S| / n_background.
-    /// This avoids per-evaluation divisions in the hot path.
-    pub leaf_probs: FxHashMap<usize, LeafProbabilities>,
+    /// For each leaf j and feature subset S, stores leaf_value * (|D_S| / n_background).
+    /// This avoids per-evaluation multiplications in the hot path.
+    pub leaf_expectations: FxHashMap<usize, LeafExpectations>,
     /// Expected value of the tree: E[f(X)] = sum over all leaves of (leaf_value * prob_∅).
     ///
     /// This is the constant/intercept term in the functional decomposition (f_∅).
@@ -60,30 +60,30 @@ impl<T: TreeModel> AugmentedTree<T> {
         path_data: FxHashMap<usize, PathData>,
         all_tree_features: FeatureSubset,
     ) -> Self {
-        // Precompute probabilities for all leaves
-        let mut leaf_probs = FxHashMap::default();
+        // Precompute expectations for all leaves
+        let mut leaf_expectations = FxHashMap::default();
         let empty_subset = FeatureSubset::empty();
         let mut expected_value = 0.0;
 
         for (leaf_id, data) in &path_data {
-            let mut probs = LeafProbabilities::default();
-            let mut prob_empty = None;
+            let leaf_val = tree.leaf_value(*leaf_id).unwrap_or(0.0);
+            let mut expectations = LeafExpectations::default();
+            let mut expectation_empty = None;
 
             for (subset, obs_set) in data {
-                let p = obs_set.len() as f32 / n_background as f32;
-                probs.insert(subset.clone(), p);
+                let prob = obs_set.len() as f32 / n_background as f32;
+                let expectation = leaf_val * prob;
+                expectations.insert(subset.clone(), expectation);
                 if subset == &empty_subset {
-                    prob_empty = Some(p);
+                    expectation_empty = Some(expectation);
                 }
             }
-            leaf_probs.insert(*leaf_id, probs);
+            leaf_expectations.insert(*leaf_id, expectations);
 
             // Compute expected value contribution from this leaf
             // E[f(X)] = sum over leaves of (leaf_value * prob_∅)
-            if let Some(prob) = prob_empty {
-                if let Some(leaf_val) = tree.leaf_value(*leaf_id) {
-                    expected_value += leaf_val * prob;
-                }
+            if let Some(exp) = expectation_empty {
+                expected_value += exp;
             }
         }
 
@@ -93,21 +93,21 @@ impl<T: TreeModel> AugmentedTree<T> {
             path_data,
             n_background,
             all_tree_features,
-            leaf_probs,
+            leaf_expectations,
             expected_value,
         }
     }
 
-    /// Gets the precomputed probability for a given leaf and feature subset.
+    /// Gets the precomputed expectation for a given leaf and feature subset.
     ///
     /// # Arguments
     /// * `leaf_id` - The leaf node ID
     /// * `subset` - The feature subset S
     ///
     /// # Returns
-    /// The precomputed probability |D_S| / n_background, or `None` if not found.
-    pub fn precomputed_prob(&self, leaf_id: usize, subset: &FeatureSubset) -> Option<f32> {
-        self.leaf_probs
+    /// The precomputed expectation (leaf_value * |D_S| / n_background), or `None` if not found.
+    pub fn precomputed_expectation(&self, leaf_id: usize, subset: &FeatureSubset) -> Option<f32> {
+        self.leaf_expectations
             .get(&leaf_id)
             .and_then(|m| m.get(subset).copied())
     }
@@ -204,7 +204,7 @@ mod tests {
 
         assert_eq!(aug_tree.n_background, 100);
         assert_eq!(aug_tree.num_leaves(), 0);
-        assert!(aug_tree.leaf_probs.is_empty());
+        assert!(aug_tree.leaf_expectations.is_empty());
     }
 
     #[test]

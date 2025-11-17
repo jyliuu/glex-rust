@@ -549,8 +549,8 @@ pub type SharedObservationSet = Arc<ObservationSet>;
 /// encountered on the path from root to leaf j.
 pub type PathData = FxHashMap<FeatureSubset, SharedObservationSet>;
 
-/// For each leaf, map FeatureSubset -> probability |D_S| / n_background.
-pub type LeafProbabilities = FxHashMap<FeatureSubset, f32>;
+/// For each leaf, map FeatureSubset -> expectation (leaf_value * |D_S| / n_background).
+pub type LeafExpectations = FxHashMap<FeatureSubset, f32>;
 
 #[cfg(test)]
 mod tests {
