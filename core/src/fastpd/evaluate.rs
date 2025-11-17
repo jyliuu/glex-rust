@@ -1,4 +1,4 @@
-use ndarray::ArrayView1;
+use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
 
 use crate::fastpd::error::FastPDError;
 use crate::fastpd::parallel::{Joiner, RayonJoin, SeqJoin};
@@ -127,17 +127,10 @@ where
         // Compute U_j into a reusable scratch subset to avoid per-leaf allocations
         feature_subset.intersect_with_into(path_features, scratch_subset);
 
-        // Get D_{U_j} from P_j
-        let path_data = augmented_tree
-            .path_data
-            .get(&node_id)
-            .ok_or_else(|| FastPDError::InvalidTree("Leaf missing path data".into()))?;
-        let shared_obs_set = path_data
-            .get(scratch_subset)
+        // Get precomputed probability for U_j
+        let prob = augmented_tree
+            .precomputed_prob(node_id, scratch_subset)
             .ok_or(FastPDError::MissingObservationSet)?;
-
-        // Compute empirical probability: |D_{U_j}| / n_b
-        let prob = shared_obs_set.len() as f32 / augmented_tree.n_background as f32;
 
         // Get leaf value
         let leaf_value = tree
@@ -222,6 +215,229 @@ where
         );
         Ok(left_val? + right_val?)
     }
+}
+
+/// Evaluate v_U(x_U) for multiple subsets U and multiple evaluation points
+/// in one pass through a single augmented tree.
+///
+/// This function implements the Rcpp `recurseMarginalizeSBitmask` pattern,
+/// evaluating all evaluation points and all feature subsets in a single tree traversal.
+///
+/// # Arguments
+/// * `augmented_tree` - The augmented tree to evaluate
+/// * `evaluation_points` - Evaluation points, shape: [n_eval, n_features]
+/// * `subsets_u` - Vector of feature subsets U to evaluate
+///
+/// # Returns
+/// Matrix of shape [n_eval, n_subsets] where entry (i, j) is v_{U[j]}(x[i])
+pub fn evaluate_pd_batch_for_subsets<T: TreeModel>(
+    augmented_tree: &AugmentedTree<T>,
+    evaluation_points: &ArrayView2<f32>,
+    subsets_u: &[FeatureSubset],
+) -> Result<Array2<f32>, FastPDError> {
+    let n_eval = evaluation_points.nrows();
+    let n_subsets = subsets_u.len();
+    let mut out = Array2::<f32>::zeros((n_eval, n_subsets));
+    evaluate_batch_recursive::<T, SeqJoin>(
+        augmented_tree,
+        augmented_tree.tree.root(),
+        evaluation_points,
+        subsets_u,
+        &mut out,
+    )?;
+    Ok(out)
+}
+
+/// Recursive helper function for batch evaluation.
+///
+/// This function mirrors the Rcpp `recurseMarginalizeSBitmask` implementation,
+/// processing all evaluation points and all subsets in a single traversal.
+fn evaluate_batch_recursive<T, J>(
+    augmented_tree: &AugmentedTree<T>,
+    node_id: usize,
+    evaluation_points: &ArrayView2<f32>,
+    subsets_u: &[FeatureSubset],
+    out: &mut Array2<f32>,
+) -> Result<(), FastPDError>
+where
+    T: TreeModel,
+    J: Joiner,
+{
+    let tree = &augmented_tree.tree;
+
+    if tree.is_leaf(node_id) {
+        let leaf_value = tree
+            .leaf_value(node_id)
+            .ok_or_else(|| FastPDError::InvalidTree("Leaf missing value".into()))?;
+
+        let path_features = augmented_tree
+            .path_features
+            .get(&node_id)
+            .ok_or_else(|| FastPDError::InvalidTree("Leaf missing path features".into()))?;
+
+        let n_eval = evaluation_points.nrows();
+        let mut scratch_subset = FeatureSubset::empty();
+
+        for (j, u) in subsets_u.iter().enumerate() {
+            // U_j = U ∩ T_j
+            u.intersect_with_into(path_features, &mut scratch_subset);
+
+            let prob = augmented_tree
+                .precomputed_prob(node_id, &scratch_subset)
+                .ok_or(FastPDError::MissingObservationSet)?;
+
+            let val = leaf_value * prob;
+            let mut col = out.column_mut(j);
+            for i in 0..n_eval {
+                col[i] += val;
+            }
+        }
+        return Ok(());
+    }
+
+    // Internal node: recurse on children, then merge
+    let feature = tree
+        .node_feature(node_id)
+        .ok_or_else(|| FastPDError::InvalidTree("Internal node missing feature".into()))?;
+    let threshold = tree
+        .node_threshold(node_id)
+        .ok_or_else(|| FastPDError::InvalidTree("Internal node missing threshold".into()))?;
+    let left_child = tree
+        .left_child(node_id)
+        .ok_or_else(|| FastPDError::InvalidTree("Missing left child".into()))?;
+    let right_child = tree
+        .right_child(node_id)
+        .ok_or_else(|| FastPDError::InvalidTree("Missing right child".into()))?;
+
+    if feature >= evaluation_points.ncols() {
+        return Err(FastPDError::InvalidFeature(
+            feature,
+            evaluation_points.ncols(),
+        ));
+    }
+
+    let n_eval = evaluation_points.nrows();
+    let n_subsets = subsets_u.len();
+    let mut mat_yes = Array2::<f32>::zeros((n_eval, n_subsets));
+    let mut mat_no = Array2::<f32>::zeros((n_eval, n_subsets));
+
+    evaluate_batch_recursive::<T, J>(
+        augmented_tree,
+        left_child,
+        evaluation_points,
+        subsets_u,
+        &mut mat_yes,
+    )?;
+    evaluate_batch_recursive::<T, J>(
+        augmented_tree,
+        right_child,
+        evaluation_points,
+        subsets_u,
+        &mut mat_no,
+    )?;
+
+    let feature_col = evaluation_points.column(feature);
+    for (j, u) in subsets_u.iter().enumerate() {
+        let feature_in_u = u.contains(feature);
+        let col_yes = mat_yes.column(j);
+        let col_no = mat_no.column(j);
+        let mut col_out = out.column_mut(j);
+
+        if !feature_in_u {
+            for i in 0..n_eval {
+                col_out[i] += col_yes[i] + col_no[i];
+            }
+        } else {
+            if T::COMPARISON {
+                for i in 0..n_eval {
+                    col_out[i] += if feature_col[i] < threshold {
+                        col_yes[i]
+                    } else {
+                        col_no[i]
+                    };
+                }
+            } else {
+                for i in 0..n_eval {
+                    col_out[i] += if feature_col[i] <= threshold {
+                        col_yes[i]
+                    } else {
+                        col_no[i]
+                    };
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Given v_U(x) = E[m(X) | X_U = x_U] for all U in `subsets_u`,
+/// extract the plain partial dependence surface v_S(x_S) by
+/// selecting the column corresponding to U = S (when present).
+///
+/// # Arguments
+/// * `mat_u` - Matrix of shape [n_eval, n_subsets_u] containing v_U(x) values
+/// * `subsets_u` - Vector of feature subsets U corresponding to columns
+/// * `s` - Target feature subset S
+///
+/// # Returns
+/// Vector of v_S(x_S) values, or None if S is not in subsets_u
+pub fn pd_from_u_matrix(
+    mat_u: &Array2<f32>,
+    subsets_u: &[FeatureSubset],
+    s: &FeatureSubset,
+) -> Option<Array1<f32>> {
+    if let Some(idx) = subsets_u.iter().position(|u| u == s) {
+        Some(mat_u.column(idx).to_owned())
+    } else {
+        None
+    }
+}
+
+/// Given v_U(x) = E[m(X) | X_U = x_U] for all U in `subsets_u`,
+/// compute the functional component f_S(x_S) for a single target
+/// subset S via inclusion–exclusion, as in the GLEX ANOVA decomposition:
+///
+///   f_S(x_S) = sum_{V ⊆ S} (-1)^{|S|-|V|} E[m(X) | X_V = x_V]
+///
+/// # Arguments
+/// * `mat_u` - Matrix of shape [n_eval, n_subsets_u] containing v_U(x) values
+/// * `subsets_u` - Vector of feature subsets U corresponding to columns
+/// * `s` - Target feature subset S
+///
+/// # Returns
+/// Vector of f_S(x_S) values
+pub fn functional_component_from_u_matrix(
+    mat_u: &Array2<f32>,
+    subsets_u: &[FeatureSubset],
+    s: &FeatureSubset,
+) -> Array1<f32> {
+    let n_eval = mat_u.nrows();
+    let mut result = Array1::<f32>::zeros(n_eval);
+
+    // Build lookup map for efficiency (avoids O(|U|) search per V)
+    let u_to_idx: rustc_hash::FxHashMap<FeatureSubset, usize> = subsets_u
+        .iter()
+        .enumerate()
+        .map(|(i, u)| (u.clone(), i))
+        .collect();
+
+    // Enumerate all V ⊆ S and combine v_V(x) with ±1 coefficients
+    for v in s.all_subsets() {
+        if let Some(&idx) = u_to_idx.get(&v) {
+            let sign = if (s.len() - v.len()) % 2 == 0 {
+                1.0
+            } else {
+                -1.0
+            };
+            let col_v = mat_u.column(idx);
+            for i in 0..n_eval {
+                result[i] += sign * col_v[i];
+            }
+        }
+    }
+
+    result
 }
 
 #[cfg(test)]
