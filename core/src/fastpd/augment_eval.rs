@@ -4,7 +4,6 @@ use rayon::ThreadPoolBuilder;
 
 use crate::fastpd::augment::{augment_tree_rayon, augment_tree_seq};
 use crate::fastpd::augmented_tree::AugmentedTree;
-use crate::fastpd::cache::PDCache;
 use crate::fastpd::error::FastPDError;
 use crate::fastpd::evaluate::{
     aggregate_v_u_across_trees, functional_component_from_u_matrix, pd_from_u_matrix,
@@ -25,10 +24,6 @@ pub struct FastPD<T: TreeModel> {
     n_background: usize,
     /// Number of features
     n_features: usize,
-    /// PD caches (one per tree)
-    /// Each cache stores (point_hash, U) -> v_U mappings
-    /// Multiple S that map to same U can reuse the cached value
-    caches: Vec<PDCache>,
     /// Intercept/base_score term (e.g., from XGBoost)
     /// This is added to predictions but not to PD functions
     intercept: f32,
@@ -99,16 +94,10 @@ impl<T: TreeModel> FastPD<T> {
             })?
         };
 
-        let mut caches = Vec::with_capacity(n_trees);
-        for _ in 0..n_trees {
-            caches.push(PDCache::new());
-        }
-
         Ok(Self {
             augmented_trees,
             n_background,
             n_features,
-            caches,
             intercept,
             parallel,
         })
@@ -221,16 +210,6 @@ impl<T: TreeModel> FastPD<T> {
         }
 
         Ok(Array1::from_vec(results))
-    }
-
-    /// Clears all PD caches.
-    ///
-    /// This is useful when memory is a concern or when you want to ensure
-    /// fresh computations for a new batch of evaluations.
-    pub fn clear_caches(&mut self) {
-        for cache in &mut self.caches {
-            cache.clear();
-        }
     }
 
     /// Returns the number of trees in the ensemble.
@@ -508,29 +487,6 @@ mod tests {
         assert!((values[0] - 1.0).abs() < 1e-10);
         // Point [0.7] -> right leaf (2.0)
         assert!((values[1] - 2.0).abs() < 1e-10);
-    }
-
-    #[test]
-    fn test_fastpd_clear_caches() {
-        let tree = create_simple_tree();
-        let background = arr2(&[[0.3], [0.7], [0.2], [0.8]]);
-        let background_view = background.view();
-
-        let mut fastpd = FastPD::new_sequential(vec![tree], &background_view, 0.0).unwrap();
-
-        // Evaluate to populate cache
-        let eval_points = arr2(&[[0.3]]);
-        let eval_view = eval_points.view();
-        let _ = fastpd.pd_function(&eval_view, &[0]).unwrap();
-
-        // Caches should not be empty
-        assert!(!fastpd.caches[0].is_empty());
-
-        // Clear caches
-        fastpd.clear_caches();
-
-        // Caches should be empty
-        assert!(fastpd.caches[0].is_empty());
     }
 
     /// Create a tree with 2 features for testing multiple subsets

@@ -133,14 +133,6 @@ impl FastPDPy {
         Ok(PyArray1::from_owned_array(py, result))
     }
 
-    /// Clear all PD caches.
-    ///
-    /// This is useful when memory is a concern or when you want to ensure
-    /// fresh computations for a new batch of evaluations.
-    fn clear_caches(&mut self) {
-        self.fastpd.clear_caches();
-    }
-
     /// Returns the number of trees in the ensemble.
     fn num_trees(&self) -> usize {
         self.fastpd.num_trees()
