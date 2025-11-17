@@ -3,13 +3,14 @@
 
 mod xgboost;
 
+use glex_core::fastpd::parallel::ParallelSettings;
 use numpy::{PyArray1, PyReadonlyArray2};
 use pyo3::prelude::*;
 use pyo3::types::PyType;
 
-use glex_core::FastPD;
 use crate::xgboost::extract_trees_from_xgboost;
 use crate::xgboost::types::XGBoostTreeModel;
+use glex_core::FastPD;
 
 /// Python-facing wrapper for XGBoost tree extraction.
 ///
@@ -22,42 +23,6 @@ use crate::xgboost::types::XGBoostTreeModel;
 fn extract_trees_from_xgboost_py(model: Bound<'_, PyAny>) -> PyResult<Vec<XGBoostTreeModel>> {
     let (trees, _base_score) = extract_trees_from_xgboost(&model)?;
     Ok(trees)
-}
-
-/// Generate all possible subsets of [0, 1, ..., p-1].
-///
-/// Returns all 2^p subsets, including the empty set.
-/// Subsets are returned as sorted vectors of feature indices.
-///
-/// # Arguments
-/// * `p` - Number of features (generates subsets of [0, 1, ..., p-1])
-///
-/// # Returns
-/// A list of all subsets, where each subset is a sorted list of feature indices.
-///
-/// # Example
-/// ```
-/// >>> all_subsets(3)
-/// [[], [0], [1], [2], [0, 1], [0, 2], [1, 2], [0, 1, 2]]
-/// ```
-#[pyfunction]
-fn all_subsets(p: usize) -> Vec<Vec<usize>> {
-    let mut subsets = Vec::new();
-
-    // Generate all subsets using bit manipulation
-    // For each number from 0 to 2^p - 1, interpret its binary representation
-    // as indicating which elements are in the subset
-    for mask in 0..(1usize << p) {
-        let mut subset = Vec::new();
-        for i in 0..p {
-            if mask & (1 << i) != 0 {
-                subset.push(i);
-            }
-        }
-        subsets.push(subset);
-    }
-
-    subsets
 }
 
 /// Python-facing wrapper for FastPD.
@@ -80,12 +45,15 @@ impl FastPDPy {
     /// * `model` - XGBoost model (Booster or XGBModel)
     /// * `background_samples` - Background samples for PD estimation
     ///     shape: (n_background, n_features)
+    /// * `n_threads` - Number of threads to use for parallelization (default: 1)
     #[classmethod]
+    #[pyo3(signature = (model, background_samples, n_threads = 1))]
     fn from_xgboost(
         _cls: &Bound<'_, PyType>,
         _py: Python<'_>,
         model: Bound<'_, PyAny>,
         background_samples: PyReadonlyArray2<f64>,
+        n_threads: usize,
     ) -> PyResult<Self> {
         // Extract trees and base_score from XGBoost model
         let (trees, base_score) = extract_trees_from_xgboost(&model)?;
@@ -95,7 +63,13 @@ impl FastPDPy {
         let background_f32: ndarray::Array2<f32> = background_f64.mapv(|x| x as f32);
 
         // Create FastPD instance with intercept
-        let fastpd = FastPD::new(trees, &background_f32.view(), base_score).map_err(|e| {
+        let fastpd = FastPD::new(
+            trees,
+            &background_f32.view(),
+            base_score,
+            ParallelSettings::with_n_threads(n_threads),
+        )
+        .map_err(|e| {
             PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("FastPD error: {}", e))
         })?;
 
@@ -186,7 +160,6 @@ impl FastPDPy {
 #[pymodule]
 fn glex_rust(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(extract_trees_from_xgboost_py, m)?)?;
-    m.add_function(wrap_pyfunction!(all_subsets, m)?)?;
     m.add_class::<XGBoostTreeModel>()?;
     m.add_class::<FastPDPy>()?;
     Ok(())

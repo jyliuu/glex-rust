@@ -61,4 +61,7 @@ pub enum FastPDError {
 
     #[error("Internal error: {0}")]
     Internal(String),
+
+    #[error("Failed to create thread pool: {0}")]
+    ThreadPoolError(String),
 }
