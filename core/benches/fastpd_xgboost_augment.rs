@@ -1,6 +1,6 @@
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 
-use glex_core::FastPD;
+use glex_core::{fastpd::parallel::ParallelSettings, FastPD};
 
 mod xgboost_bench_utils;
 use xgboost_bench_utils::{
@@ -28,7 +28,7 @@ fn benchmark_fastpd_augment_for_dataset(
         b.iter(|| {
             // Clone trees so each iteration re-runs augmentation from scratch.
             let trees_clone = trees.clone();
-            let fastpd = FastPD::new(trees_clone, &background_view, 0.0)
+            let fastpd = FastPD::new(trees_clone, &background_view, 0.0, ParallelSettings::with_n_threads(2))
                 .expect("Failed to construct FastPD");
             black_box(fastpd.num_trees());
         });

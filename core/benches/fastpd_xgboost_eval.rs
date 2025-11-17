@@ -1,7 +1,7 @@
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 use ndarray::{s, Array2};
 
-use glex_core::{all_subsets, FastPD};
+use glex_core::{all_subsets, fastpd::parallel::ParallelSettings, FastPD};
 
 mod xgboost_bench_utils;
 use xgboost_bench_utils::{
@@ -33,7 +33,7 @@ fn benchmark_fastpd_eval_for_dataset(
 
     // Use the whole dataset as background for augmentation (preprocessing step).
     let background_view = background.view();
-    let mut fastpd = FastPD::new(trees, &background_view, 0.0).expect("Failed to construct FastPD");
+    let mut fastpd = FastPD::new(trees, &background_view, 0.0, ParallelSettings::sequential()).expect("Failed to construct FastPD");
 
     let eval_view = eval_points.view();
 
