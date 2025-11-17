@@ -1,10 +1,13 @@
 use ndarray::{Array1, ArrayView2};
+use rayon::prelude::*;
+use rayon::ThreadPoolBuilder;
 
-use crate::fastpd::augment::augment_tree;
+use crate::fastpd::augment::{augment_tree_rayon, augment_tree_seq};
 use crate::fastpd::augmented_tree::AugmentedTree;
 use crate::fastpd::cache::PDCache;
 use crate::fastpd::error::FastPDError;
 use crate::fastpd::evaluate::evaluate_pd_function;
+use crate::fastpd::parallel::ParallelSettings;
 use crate::fastpd::tree::TreeModel;
 use crate::fastpd::types::FeatureSubset;
 
@@ -41,6 +44,11 @@ impl<T: TreeModel> FastPD<T> {
     /// * `background_samples` - Background samples for PD estimation
     ///     shape: (n_background, n_features)
     /// * `intercept` - Intercept/base_score term to add to predictions (default: 0.0)
+    /// * `parallel` - Parallelization settings (default: sequential)
+    ///
+    /// # Parallelization
+    /// - If `parallel.n_threads <= 1`: Fully sequential execution, no Rayon overhead
+    /// - If `parallel.n_threads > 1`: Parallel execution across trees and within tree recursion
     ///
     /// # Returns
     /// `FastPD` instance with all trees augmented
@@ -51,6 +59,7 @@ impl<T: TreeModel> FastPD<T> {
         trees: Vec<T>,
         background_samples: &ArrayView2<f32>,
         intercept: f32,
+        parallel: ParallelSettings,
     ) -> Result<Self, FastPDError> {
         if background_samples.nrows() == 0 {
             return Err(FastPDError::EmptyBackground);
@@ -60,11 +69,30 @@ impl<T: TreeModel> FastPD<T> {
         let n_background = background_samples.nrows();
         let n_trees = trees.len();
 
-        let mut augmented_trees = Vec::with_capacity(n_trees);
-        for tree in trees {
-            let aug_tree = augment_tree(tree, background_samples)?;
-            augmented_trees.push(aug_tree);
-        }
+        let augmented_trees = if !parallel.is_parallel() {
+            // Sequential path: no Rayon anywhere
+            let mut augmented_trees = Vec::with_capacity(n_trees);
+            for tree in trees {
+                let aug_tree = augment_tree_seq(tree, background_samples)?;
+                augmented_trees.push(aug_tree);
+            }
+            augmented_trees
+        } else {
+            // Parallel path: create thread pool and parallelize
+            let n_threads = parallel.n_threads;
+            let pool = ThreadPoolBuilder::new()
+                .num_threads(n_threads)
+                .build()
+                .map_err(|e| FastPDError::ThreadPoolError(e.to_string()))?;
+
+            // All Rayon work happens inside this install scope
+            pool.install(|| {
+                trees
+                    .into_par_iter()
+                    .map(|tree| augment_tree_rayon(tree, background_samples))
+                    .collect::<Result<Vec<_>, _>>()
+            })?
+        };
 
         let mut caches = Vec::with_capacity(n_trees);
         for _ in 0..n_trees {
@@ -78,6 +106,23 @@ impl<T: TreeModel> FastPD<T> {
             caches,
             intercept,
         })
+    }
+
+    /// Legacy constructor: uses sequential execution by default.
+    ///
+    /// This method is kept for backward compatibility. New code should use
+    /// `new()` with explicit `ParallelSettings`.
+    pub fn new_sequential(
+        trees: Vec<T>,
+        background_samples: &ArrayView2<f32>,
+        intercept: f32,
+    ) -> Result<Self, FastPDError> {
+        Self::new(
+            trees,
+            background_samples,
+            intercept,
+            ParallelSettings::sequential(),
+        )
     }
 
     /// Computes the PD function v_S(x_S) for a single feature subset.
@@ -251,7 +296,7 @@ mod tests {
         let background = arr2(&[[0.3], [0.7], [0.2], [0.8]]);
         let background_view = background.view();
 
-        let fastpd = FastPD::new(vec![tree], &background_view, 0.0).unwrap();
+        let fastpd = FastPD::new_sequential(vec![tree], &background_view, 0.0).unwrap();
         assert_eq!(fastpd.num_trees(), 1);
         assert_eq!(fastpd.n_background(), 4);
         assert_eq!(fastpd.n_features(), 1);
@@ -263,7 +308,7 @@ mod tests {
         let background = arr2(&[[0.0; 0]; 0]); // Empty array
         let background_view = background.view();
 
-        let result = FastPD::new(vec![tree], &background_view, 0.0);
+        let result = FastPD::new_sequential(vec![tree], &background_view, 0.0);
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), FastPDError::EmptyBackground));
     }
@@ -274,7 +319,7 @@ mod tests {
         let background = arr2(&[[0.3], [0.7], [0.2], [0.8]]);
         let background_view = background.view();
 
-        let mut fastpd = FastPD::new(vec![tree], &background_view, 0.0).unwrap();
+        let mut fastpd = FastPD::new_sequential(vec![tree], &background_view, 0.0).unwrap();
 
         // Evaluate PD for S = {0} at point [0.3]
         let eval_points = arr2(&[[0.3]]);
@@ -294,7 +339,7 @@ mod tests {
         let background = arr2(&[[0.3], [0.7], [0.2], [0.8]]);
         let background_view = background.view();
 
-        let mut fastpd = FastPD::new(vec![tree], &background_view, 0.0).unwrap();
+        let mut fastpd = FastPD::new_sequential(vec![tree], &background_view, 0.0).unwrap();
 
         // Evaluate PD for S = {0} at multiple points
         let eval_points = arr2(&[[0.3], [0.7]]);
@@ -316,7 +361,7 @@ mod tests {
         let background = arr2(&[[0.3], [0.7], [0.2], [0.8]]);
         let background_view = background.view();
 
-        let mut fastpd = FastPD::new(vec![tree], &background_view, 0.0).unwrap();
+        let mut fastpd = FastPD::new_sequential(vec![tree], &background_view, 0.0).unwrap();
 
         // Evaluate to populate cache
         let eval_points = arr2(&[[0.3]]);

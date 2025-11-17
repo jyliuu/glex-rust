@@ -3,6 +3,7 @@
 
 mod xgboost;
 
+use glex_core::fastpd::parallel::ParallelSettings;
 use numpy::{PyArray1, PyReadonlyArray2};
 use pyo3::prelude::*;
 use pyo3::types::PyType;
@@ -59,7 +60,7 @@ impl FastPDPy {
         let background_f32: ndarray::Array2<f32> = background_f64.mapv(|x| x as f32);
 
         // Create FastPD instance with intercept
-        let fastpd = FastPD::new(trees, &background_f32.view(), base_score).map_err(|e| {
+        let fastpd = FastPD::new(trees, &background_f32.view(), base_score, ParallelSettings::sequential()).map_err(|e| {
             PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("FastPD error: {}", e))
         })?;
 

@@ -4,29 +4,16 @@ use std::sync::Arc;
 use ndarray::ArrayView2;
 
 use crate::fastpd::error::FastPDError;
+use crate::fastpd::parallel::{Joiner, RayonJoin, SeqJoin};
 use crate::fastpd::tree::TreeModel;
 use crate::fastpd::types::{FeatureSubset, ObservationSet, PathData, SharedObservationSet};
 
 use super::augmented_tree::AugmentedTree;
 
-/// Augments a tree with background samples according to Algorithm 1 from the FastPD paper.
+/// Augments a tree sequentially (no parallelization).
 ///
-/// This function implements the augmentation phase of FastPD, which precomputes
-/// observation sets D_S for each feature subset S and each leaf j.
-///
-/// # Arguments
-/// * `tree` - The tree model to augment
-/// * `background_samples` - Background data array (n_samples, n_features)
-///
-/// # Returns
-/// An `AugmentedTree` containing path features T_j and path data P_j for each leaf j.
-///
-/// # Errors
-/// Returns `FastPDError` if:
-/// - Background samples are empty
-/// - Tree structure is invalid
-/// - Feature indices are out of bounds
-pub fn augment_tree<T: TreeModel>(
+/// This is a thin wrapper around `augment_recursive::<T, SeqJoin>`.
+pub fn augment_tree_seq<T: TreeModel>(
     tree: T,
     background_samples: &ArrayView2<f32>,
 ) -> Result<AugmentedTree<T>, FastPDError> {
@@ -36,35 +23,26 @@ pub fn augment_tree<T: TreeModel>(
     }
 
     let n_features = background_samples.ncols();
-    let mut path_features = HashMap::new();
-    let mut path_data = HashMap::new();
+    let root = tree.root();
+    let initial_path_features = FeatureSubset::empty();
 
-    // Initialize: all observations in D_∅
-    // Wrap in Arc to allow sharing during recursion
     let all_indices: Vec<usize> = (0..n_background).collect();
     let initial_set: SharedObservationSet = Arc::new(ObservationSet::Indices(all_indices));
     let mut initial_path_data = PathData::new();
     initial_path_data.insert(FeatureSubset::empty(), initial_set);
 
-    // Recursive augmentation starting from root
-    // T = ∅ (empty path features), P = {(∅, D_{n_b})}
-    augment_recursive(
+    let (path_features, path_data) = augment_recursive::<T, SeqJoin>(
         &tree,
-        tree.root(),
-        &mut path_features,
-        &mut path_data,
-        FeatureSubset::empty(), // T (path features so far)
-        initial_path_data,      // P (path data so far)
+        root,
+        initial_path_features,
+        initial_path_data,
         background_samples,
         n_features,
     )?;
 
-    // Precompute union of all path features across leaves: U_T = ⋃_j T_j.
-    // This is used during PD evaluation to compute U = S ∩ U_T without
-    // recomputing the union for every query.
+    // Compute union of all path features
     let mut all_tree_features = FeatureSubset::empty();
     for feats in path_features.values() {
-        // Union all path features
         let feats_vec = feats.as_slice();
         all_tree_features = all_tree_features.union(&feats_vec);
     }
@@ -78,25 +56,89 @@ pub fn augment_tree<T: TreeModel>(
     ))
 }
 
+/// Augments a tree in parallel (uses Rayon for recursion).
+///
+/// This is a thin wrapper around `augment_recursive::<T, RayonJoin>`.
+/// **Important**: This function must be called from within a Rayon thread pool
+/// (via `ThreadPool::install()`) for proper parallel execution.
+pub fn augment_tree_rayon<T: TreeModel>(
+    tree: T,
+    background_samples: &ArrayView2<f32>,
+) -> Result<AugmentedTree<T>, FastPDError> {
+    let n_background = background_samples.nrows();
+    if n_background == 0 {
+        return Err(FastPDError::EmptyBackground);
+    }
+
+    let n_features = background_samples.ncols();
+    let root = tree.root();
+    let initial_path_features = FeatureSubset::empty();
+
+    let all_indices: Vec<usize> = (0..n_background).collect();
+    let initial_set: SharedObservationSet = Arc::new(ObservationSet::Indices(all_indices));
+    let mut initial_path_data = PathData::new();
+    initial_path_data.insert(FeatureSubset::empty(), initial_set);
+
+    let (path_features, path_data) = augment_recursive::<T, RayonJoin>(
+        &tree,
+        root,
+        initial_path_features,
+        initial_path_data,
+        background_samples,
+        n_features,
+    )?;
+
+    // Compute union of all path features
+    let mut all_tree_features = FeatureSubset::empty();
+    for feats in path_features.values() {
+        let feats_vec = feats.as_slice();
+        all_tree_features = all_tree_features.union(&feats_vec);
+    }
+
+    Ok(AugmentedTree::new(
+        tree,
+        n_background,
+        path_features,
+        path_data,
+        all_tree_features,
+    ))
+}
+
+/// Legacy function: delegates to `augment_tree_seq` for backward compatibility.
+///
+/// This function is kept for existing code that calls `augment_tree()` directly.
+/// New code should use `augment_tree_seq()` or `augment_tree_rayon()` explicitly.
+pub fn augment_tree<T: TreeModel>(
+    tree: T,
+    background_samples: &ArrayView2<f32>,
+) -> Result<AugmentedTree<T>, FastPDError> {
+    augment_tree_seq(tree, background_samples)
+}
+
 /// Recursive helper function for tree augmentation.
 ///
 /// This implements the RECURSE function from Algorithm 1 in the paper.
+/// Returns maps instead of mutating to enable parallelization.
 #[allow(clippy::too_many_arguments)]
-fn augment_recursive<T: TreeModel>(
+fn augment_recursive<T, J>(
     tree: &T,
     node_id: usize,
-    path_features: &mut HashMap<usize, FeatureSubset>,
-    path_data: &mut HashMap<usize, PathData>,
     current_path_features: FeatureSubset, // T
     current_path_data: PathData,          // P
     background_samples: &ArrayView2<f32>,
     n_features: usize,
-) -> Result<(), FastPDError> {
+) -> Result<(HashMap<usize, FeatureSubset>, HashMap<usize, PathData>), FastPDError>
+where
+    T: TreeModel,
+    J: Joiner,
+{
     if tree.is_leaf(node_id) {
         // Store T_j and P_j for this leaf
+        let mut path_features = HashMap::new();
+        let mut path_data = HashMap::new();
         path_features.insert(node_id, current_path_features);
         path_data.insert(node_id, current_path_data);
-        return Ok(());
+        return Ok((path_features, path_data));
     }
 
     // Get node information
@@ -167,29 +209,40 @@ fn augment_recursive<T: TreeModel>(
         }
     }
 
-    // Recurse to children
-    augment_recursive(
-        tree,
-        left_child,
-        path_features,
-        path_data,
-        new_path_features.clone(),
-        path_data_yes,
-        background_samples,
-        n_features,
-    )?;
-    augment_recursive(
-        tree,
-        right_child,
-        path_features,
-        path_data,
-        new_path_features,
-        path_data_no,
-        background_samples,
-        n_features,
-    )?;
+    // Recurse using Joiner trait
+    // Clone new_path_features for the left child since we need to move it for the right child
+    let new_path_features_left = new_path_features.clone();
+    let (left_result, right_result) = J::join(
+        || {
+            augment_recursive::<T, J>(
+                tree,
+                left_child,
+                new_path_features_left,
+                path_data_yes,
+                background_samples,
+                n_features,
+            )
+        },
+        || {
+            augment_recursive::<T, J>(
+                tree,
+                right_child,
+                new_path_features,
+                path_data_no,
+                background_samples,
+                n_features,
+            )
+        },
+    );
 
-    Ok(())
+    let (mut left_features, mut left_data) = left_result?;
+    let (right_features, right_data) = right_result?;
+
+    // Merge results
+    left_features.extend(right_features);
+    left_data.extend(right_data);
+
+    Ok((left_features, left_data))
 }
 
 #[cfg(test)]
