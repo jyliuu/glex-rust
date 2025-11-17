@@ -412,51 +412,27 @@ impl<T: TreeModel> FastPD<T> {
         let n_subsets_u = subsets_u.len();
 
         // 3. Aggregate v_U(x) across trees
+        // evaluate_pd_batch_for_subsets populates v_∅ with each tree's expected value
         let mut mat_u = Array2::<f32>::zeros((n_eval, n_subsets_u));
         for aug_tree in &self.augmented_trees {
             let tree_mat = evaluate_pd_batch_for_subsets(aug_tree, evaluation_points, &subsets_u)?;
             mat_u = &mat_u + &tree_mat;
         }
-
-        // Compute total expected value: E[m(X)] = sum over all trees of expected_value
-        let total_expected_value: f32 = self
-            .augmented_trees
-            .iter()
-            .map(|t| t.expected_value)
-            .sum::<f32>()
-            + self.intercept;
-
-        // Add expected value to v_∅ (empty subset column) if present
-        // v_∅ = E[m(X)] should be the total expected value
-        let empty_subset = FeatureSubset::empty();
-        if let Some(empty_idx) = subsets_u.iter().position(|u| u == &empty_subset) {
-            let mut empty_col = mat_u.column_mut(empty_idx);
-            empty_col += total_expected_value;
-        }
-
         // 4. Derive f_S(x_S) for all S with 1 <= |S| <= max_order via inclusion–exclusion
         let target_subsets: Vec<FeatureSubset> = all_encountered
             .subsets_up_to_order(max_order)
             .into_iter()
-            .filter(|s| !s.is_empty())
             .collect();
 
         let n_target_subsets = target_subsets.len();
-        // Add one more column for the expected value (empty subset)
-        let mut comp_mat = Array2::<f32>::zeros((n_eval, n_target_subsets + 1));
-        let mut comp_subsets = Vec::with_capacity(n_target_subsets + 1);
+        let mut comp_mat = Array2::<f32>::zeros((n_eval, n_target_subsets));
+        let mut comp_subsets = Vec::with_capacity(n_target_subsets);
 
         for (col_idx, s) in target_subsets.iter().enumerate() {
             let col = functional_component_from_u_matrix(&mat_u, &subsets_u, s);
             comp_mat.column_mut(col_idx).assign(&col);
             comp_subsets.push(s.clone());
         }
-
-        // 5. Add expected value (f_∅) as the last column
-        // f_∅ = E[m(X)] = total_expected_value (already computed above)
-        let expected_col = Array1::<f32>::from_elem(n_eval, total_expected_value);
-        comp_mat.column_mut(n_target_subsets).assign(&expected_col);
-        comp_subsets.push(FeatureSubset::empty());
 
         Ok((comp_mat, comp_subsets))
     }
@@ -724,5 +700,61 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn test_functional_decomp_sum_equals_predictions() {
+        let tree = create_two_feature_tree();
+        // Create background data with 2 features
+        let background = arr2(&[
+            [0.3, 0.3],
+            [0.3, 0.7],
+            [0.7, 0.3],
+            [0.7, 0.7],
+            [0.2, 0.2],
+            [0.8, 0.8],
+        ]);
+        let background_view = background.view();
+
+        let mut fastpd = FastPD::new_sequential(vec![tree], &background_view, 0.0).unwrap();
+
+        // Create multiple evaluation points
+        let eval_points = arr2(&[[0.3, 0.3], [0.7, 0.7], [0.4, 0.6], [0.1, 0.9]]);
+        let eval_view = eval_points.view();
+
+        // Compute functional decomposition up to order 2
+        let max_order = 2;
+        let (comp_mat, comp_subsets) = fastpd
+            .functional_decomp_up_to_order(&eval_view, max_order)
+            .unwrap();
+
+        // Compute predictions for the same evaluation points
+        let predictions = fastpd.predict(&eval_view).unwrap();
+
+        // Verify that sum of all functional components equals predictions
+        let n_eval = eval_points.nrows();
+        assert_eq!(comp_mat.nrows(), n_eval);
+        assert_eq!(predictions.len(), n_eval);
+
+        for point_idx in 0..n_eval {
+            // Sum all functional components for this point
+            let component_sum: f32 = comp_mat.row(point_idx).sum();
+
+            // Get the prediction for this point
+            let prediction = predictions[point_idx];
+
+            assert!(
+                (component_sum - prediction).abs() < 1e-6,
+                "Mismatch at point {}: sum of components={}, prediction={}",
+                point_idx,
+                component_sum,
+                prediction
+            );
+        }
+
+        // Also verify we have the expected components
+        // Should have: {0}, {1}, {0,1}, and ∅ (empty subset)
+        assert_eq!(comp_subsets.len(), 4);
+        assert_eq!(comp_mat.ncols(), 4);
     }
 }

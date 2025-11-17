@@ -233,6 +233,11 @@ pub fn evaluate_pd_batch_for_subsets<T: TreeModel>(
     let n_eval = evaluation_points.nrows();
     let n_subsets = subsets_u.len();
     let mut out = Array2::<f32>::zeros((n_eval, n_subsets));
+
+    // Find empty subset index (if present) to set it directly to expected value
+    let empty_subset = FeatureSubset::empty();
+    let empty_idx = subsets_u.iter().position(|u| u == &empty_subset);
+
     evaluate_batch_recursive::<T, SeqJoin>(
         augmented_tree,
         augmented_tree.tree.root(),
@@ -240,6 +245,13 @@ pub fn evaluate_pd_batch_for_subsets<T: TreeModel>(
         subsets_u,
         &mut out,
     )?;
+
+    // Set empty subset column directly to expected value (constant across all evaluation points)
+    if let Some(idx) = empty_idx {
+        let mut empty_col = out.column_mut(idx);
+        empty_col.fill(augmented_tree.expected_value);
+    }
+
     Ok(out)
 }
 
