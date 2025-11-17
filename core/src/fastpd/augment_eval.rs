@@ -413,12 +413,14 @@ impl<T: TreeModel> FastPD<T> {
 
         // 3. Aggregate v_U(x) across trees
         // evaluate_pd_batch_for_subsets populates v_∅ with each tree's expected value
+        // NOTE: Do NOT add intercept to v_∅ here - it will be added to f_∅ after inclusion-exclusion
         let mut mat_u = Array2::<f32>::zeros((n_eval, n_subsets_u));
         for aug_tree in &self.augmented_trees {
             let tree_mat = evaluate_pd_batch_for_subsets(aug_tree, evaluation_points, &subsets_u)?;
             mat_u = &mat_u + &tree_mat;
         }
-        // 4. Derive f_S(x_S) for all S with 1 <= |S| <= max_order via inclusion–exclusion
+
+        // 4. Derive f_S(x_S) for all S with 0 <= |S| <= max_order via inclusion–exclusion
         let target_subsets: Vec<FeatureSubset> = all_encountered
             .subsets_up_to_order(max_order)
             .into_iter()
@@ -428,8 +430,16 @@ impl<T: TreeModel> FastPD<T> {
         let mut comp_mat = Array2::<f32>::zeros((n_eval, n_target_subsets));
         let mut comp_subsets = Vec::with_capacity(n_target_subsets);
 
+        let empty_subset = FeatureSubset::empty();
         for (col_idx, s) in target_subsets.iter().enumerate() {
-            let col = functional_component_from_u_matrix(&mat_u, &subsets_u, s);
+            let mut col = functional_component_from_u_matrix(&mat_u, &subsets_u, s);
+
+            // For empty subset, add intercept to f_∅ after inclusion-exclusion
+            // This ensures intercept is only in f_∅ and doesn't get cancelled in other components
+            if s == &empty_subset {
+                col += self.intercept;
+            }
+
             comp_mat.column_mut(col_idx).assign(&col);
             comp_subsets.push(s.clone());
         }
@@ -653,7 +663,7 @@ mod tests {
         ]);
         let background_view = background.view();
 
-        let mut fastpd = FastPD::new_sequential(vec![tree], &background_view, 0.0).unwrap();
+        let mut fastpd = FastPD::new_sequential(vec![tree], &background_view, 1.0).unwrap();
 
         // Create multiple evaluation points
         let eval_points = arr2(&[[0.3, 0.3], [0.7, 0.7], [0.4, 0.6]]);
