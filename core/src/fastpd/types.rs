@@ -300,6 +300,103 @@ impl FeatureSubset {
         }
         features
     }
+
+    /// Return all subsets of `self` (including empty).
+    ///
+    /// This is implemented efficiently using bitmask submask iteration
+    /// rather than converting to Vec<FeatureIndex> and doing combinatorics.
+    ///
+    /// For `FeatureSubset::Small(mask)`, iterates over all submasks of `mask`
+    /// using the efficient Gray code pattern: `submask = (submask - 1) & mask`.
+    ///
+    /// For `FeatureSubset::Large(mask)`, iterates per `u64` chunk and constructs
+    /// submasks across chunks, avoiding conversion to `Vec<usize>` in hot paths.
+    pub fn all_subsets(&self) -> Vec<FeatureSubset> {
+        match self {
+            Self::Small(mask) => {
+                if *mask == 0 {
+                    return vec![Self::Small(0)];
+                }
+                let mut result = Vec::new();
+                let mut submask = *mask;
+                loop {
+                    result.push(Self::Small(submask));
+                    if submask == 0 {
+                        break;
+                    }
+                    submask = (submask.wrapping_sub(1)) & mask;
+                }
+                result
+            }
+            Self::Large(mask) => {
+                // For large masks, we need to iterate over all combinations of submasks
+                // across chunks. This is more complex but still efficient.
+                let n_chunks = mask.len();
+                if n_chunks == 0 {
+                    return vec![Self::Small(0)];
+                }
+
+                // Count total number of subsets: 2^popcount(mask)
+                let total_subsets = 1usize << self.len();
+                let mut result = Vec::with_capacity(total_subsets);
+
+                // Generate all submasks by iterating over all possible combinations
+                // of chunk submasks. We use a recursive approach to generate all combinations.
+                let mut chunk_subsets: Vec<Vec<u64>> = Vec::new();
+                for &chunk in mask.iter() {
+                    let mut chunk_subset = Vec::new();
+                    let mut submask = chunk;
+                    loop {
+                        chunk_subset.push(submask);
+                        if submask == 0 {
+                            break;
+                        }
+                        submask = (submask.wrapping_sub(1)) & chunk;
+                    }
+                    chunk_subsets.push(chunk_subset);
+                }
+
+                // Generate all combinations of chunk submasks
+                fn generate_combinations(
+                    chunk_subsets: &[Vec<u64>],
+                    idx: usize,
+                    current: Vec<u64>,
+                    result: &mut Vec<FeatureSubset>,
+                ) {
+                    if idx >= chunk_subsets.len() {
+                        // Check if this is effectively a Small subset (single chunk, all others zero)
+                        // For a single chunk, it's always representable as Small (u64 can hold 64 bits)
+                        if current.len() == 1 {
+                            result.push(FeatureSubset::Small(current[0]));
+                        } else {
+                            result.push(FeatureSubset::Large(current));
+                        }
+                        return;
+                    }
+
+                    for &submask in &chunk_subsets[idx] {
+                        let mut new_current = current.clone();
+                        new_current.push(submask);
+                        generate_combinations(chunk_subsets, idx + 1, new_current, result);
+                    }
+                }
+
+                generate_combinations(&chunk_subsets, 0, Vec::new(), &mut result);
+                result
+            }
+        }
+    }
+
+    /// Return all subsets of `self` with size <= `max_order`.
+    ///
+    /// Filters the result of `all_subsets()` to only include subsets
+    /// with cardinality <= `max_order`.
+    pub fn subsets_up_to_order(&self, max_order: usize) -> Vec<FeatureSubset> {
+        self.all_subsets()
+            .into_iter()
+            .filter(|s| s.len() <= max_order)
+            .collect()
+    }
 }
 
 impl PartialEq for FeatureSubset {
@@ -451,6 +548,9 @@ pub type SharedObservationSet = Arc<ObservationSet>;
 /// For each leaf j, this stores the observation sets D_S for each feature subset S
 /// encountered on the path from root to leaf j.
 pub type PathData = FxHashMap<FeatureSubset, SharedObservationSet>;
+
+/// For each leaf, map FeatureSubset -> probability |D_S| / n_background.
+pub type LeafProbabilities = FxHashMap<FeatureSubset, f32>;
 
 #[cfg(test)]
 mod tests {

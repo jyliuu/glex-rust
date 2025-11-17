@@ -1,7 +1,7 @@
 use rustc_hash::FxHashMap;
 
 use crate::fastpd::tree::TreeModel;
-use crate::fastpd::types::{FeatureSubset, PathData};
+use crate::fastpd::types::{FeatureSubset, LeafProbabilities, PathData};
 
 /// Augmented tree storing path features and path data for each leaf.
 ///
@@ -33,6 +33,11 @@ pub struct AugmentedTree<T: TreeModel> {
     /// v_S(x_S) does not need to recompute the union of all path features
     /// for every query.
     pub all_tree_features: FeatureSubset,
+    /// Precomputed probabilities for each leaf: leaf_id -> (FeatureSubset -> probability).
+    ///
+    /// For each leaf j and feature subset S, stores |D_S| / n_background.
+    /// This avoids per-evaluation divisions in the hot path.
+    pub leaf_probs: FxHashMap<usize, LeafProbabilities>,
 }
 
 impl<T: TreeModel> AugmentedTree<T> {
@@ -51,13 +56,39 @@ impl<T: TreeModel> AugmentedTree<T> {
         path_data: FxHashMap<usize, PathData>,
         all_tree_features: FeatureSubset,
     ) -> Self {
+        // Precompute probabilities for all leaves
+        let mut leaf_probs = FxHashMap::default();
+        for (leaf_id, data) in &path_data {
+            let mut probs = LeafProbabilities::default();
+            for (subset, obs_set) in data {
+                let p = obs_set.len() as f32 / n_background as f32;
+                probs.insert(subset.clone(), p);
+            }
+            leaf_probs.insert(*leaf_id, probs);
+        }
+
         Self {
             tree,
             path_features,
             path_data,
             n_background,
             all_tree_features,
+            leaf_probs,
         }
+    }
+
+    /// Gets the precomputed probability for a given leaf and feature subset.
+    ///
+    /// # Arguments
+    /// * `leaf_id` - The leaf node ID
+    /// * `subset` - The feature subset S
+    ///
+    /// # Returns
+    /// The precomputed probability |D_S| / n_background, or `None` if not found.
+    pub fn precomputed_prob(&self, leaf_id: usize, subset: &FeatureSubset) -> Option<f32> {
+        self.leaf_probs
+            .get(&leaf_id)
+            .and_then(|m| m.get(subset).copied())
     }
 
     /// Returns the number of leaves in the augmented tree.
@@ -152,6 +183,7 @@ mod tests {
 
         assert_eq!(aug_tree.n_background, 100);
         assert_eq!(aug_tree.num_leaves(), 0);
+        assert!(aug_tree.leaf_probs.is_empty());
     }
 
     #[test]
