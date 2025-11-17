@@ -21,11 +21,6 @@ pub use xgboost::parse_json_tree;
 /// # Returns
 /// A list of all subsets, where each subset is a sorted list of feature indices.
 ///
-/// # Example
-/// ```
-/// all_subsets(3)
-/// [[], [0], [1], [2], [0, 1], [0, 2], [1, 2], [0, 1, 2]]
-/// ```
 pub fn all_subsets(p: usize) -> Vec<Vec<usize>> {
     let mut subsets = Vec::new();
 
