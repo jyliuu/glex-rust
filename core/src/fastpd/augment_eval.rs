@@ -1,6 +1,6 @@
 use ndarray::{Array1, Array2, ArrayView2};
 use rayon::prelude::*;
-use rayon::ThreadPoolBuilder;
+use rayon::{ThreadPool, ThreadPoolBuilder};
 
 use crate::fastpd::augment::{augment_tree_rayon, augment_tree_seq};
 use crate::fastpd::augmented_tree::AugmentedTree;
@@ -27,8 +27,8 @@ pub struct FastPD<T: TreeModel> {
     /// Intercept/base_score term (e.g., from XGBoost)
     /// This is added to predictions but not to PD functions
     intercept: f32,
-    /// Parallelization settings used for both augmentation and evaluation
-    parallel: ParallelSettings,
+    /// Thread pool for parallel execution (only Some if parallel.n_threads > 1)
+    thread_pool: Option<ThreadPool>,
 }
 
 impl<T: TreeModel> FastPD<T> {
@@ -68,17 +68,16 @@ impl<T: TreeModel> FastPD<T> {
         let n_background = background_samples.nrows();
         let n_trees = trees.len();
 
-        let augmented_trees = if !parallel.is_parallel() {
+        let (augmented_trees, thread_pool) = if !parallel.is_parallel() {
             // Sequential path: no Rayon anywhere
             let mut augmented_trees = Vec::with_capacity(n_trees);
             for tree in trees {
                 let aug_tree = augment_tree_seq(tree, background_samples)?;
                 augmented_trees.push(aug_tree);
             }
-            augmented_trees
+            (augmented_trees, None)
         } else {
             // Parallel path: create thread pool and parallelize
-            // TODO: save this pool so we don't create a new one every time
             let n_threads = parallel.n_threads;
             let pool = ThreadPoolBuilder::new()
                 .num_threads(n_threads)
@@ -86,12 +85,14 @@ impl<T: TreeModel> FastPD<T> {
                 .map_err(|e| FastPDError::ThreadPoolError(e.to_string()))?;
 
             // All Rayon work happens inside this install scope
-            pool.install(|| {
+            let augmented_trees = pool.install(|| {
                 trees
                     .into_par_iter()
                     .map(|tree| augment_tree_rayon(tree, background_samples))
                     .collect::<Result<Vec<_>, _>>()
-            })?
+            })?;
+
+            (augmented_trees, Some(pool))
         };
 
         Ok(Self {
@@ -99,7 +100,7 @@ impl<T: TreeModel> FastPD<T> {
             n_background,
             n_features,
             intercept,
-            parallel,
+            thread_pool,
         })
     }
 
@@ -154,7 +155,7 @@ impl<T: TreeModel> FastPD<T> {
             &self.augmented_trees,
             evaluation_points,
             &subsets_u,
-            self.parallel,
+            self.thread_pool.as_ref(),
         )?;
 
         // Extract the single column and add intercept
@@ -260,7 +261,7 @@ impl<T: TreeModel> FastPD<T> {
             &self.augmented_trees,
             evaluation_points,
             &subsets_u,
-            self.parallel,
+            self.thread_pool.as_ref(),
         )?;
 
         Ok((mat_u, subsets_u, all_encountered))
