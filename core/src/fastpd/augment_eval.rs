@@ -418,6 +418,22 @@ impl<T: TreeModel> FastPD<T> {
             mat_u = &mat_u + &tree_mat;
         }
 
+        // Compute total expected value: E[m(X)] = sum over all trees of expected_value
+        let total_expected_value: f32 = self
+            .augmented_trees
+            .iter()
+            .map(|t| t.expected_value)
+            .sum::<f32>()
+            + self.intercept;
+
+        // Add expected value to v_∅ (empty subset column) if present
+        // v_∅ = E[m(X)] should be the total expected value
+        let empty_subset = FeatureSubset::empty();
+        if let Some(empty_idx) = subsets_u.iter().position(|u| u == &empty_subset) {
+            let mut empty_col = mat_u.column_mut(empty_idx);
+            empty_col += total_expected_value;
+        }
+
         // 4. Derive f_S(x_S) for all S with 1 <= |S| <= max_order via inclusion–exclusion
         let target_subsets: Vec<FeatureSubset> = all_encountered
             .subsets_up_to_order(max_order)
@@ -426,8 +442,9 @@ impl<T: TreeModel> FastPD<T> {
             .collect();
 
         let n_target_subsets = target_subsets.len();
-        let mut comp_mat = Array2::<f32>::zeros((n_eval, n_target_subsets));
-        let mut comp_subsets = Vec::with_capacity(n_target_subsets);
+        // Add one more column for the expected value (empty subset)
+        let mut comp_mat = Array2::<f32>::zeros((n_eval, n_target_subsets + 1));
+        let mut comp_subsets = Vec::with_capacity(n_target_subsets + 1);
 
         for (col_idx, s) in target_subsets.iter().enumerate() {
             let col = functional_component_from_u_matrix(&mat_u, &subsets_u, s);
@@ -435,7 +452,11 @@ impl<T: TreeModel> FastPD<T> {
             comp_subsets.push(s.clone());
         }
 
-        // Note: intercept is not added to functional components (they sum to the prediction)
+        // 5. Add expected value (f_∅) as the last column
+        // f_∅ = E[m(X)] = total_expected_value (already computed above)
+        let expected_col = Array1::<f32>::from_elem(n_eval, total_expected_value);
+        comp_mat.column_mut(n_target_subsets).assign(&expected_col);
+        comp_subsets.push(FeatureSubset::empty());
 
         Ok((comp_mat, comp_subsets))
     }

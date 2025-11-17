@@ -38,6 +38,10 @@ pub struct AugmentedTree<T: TreeModel> {
     /// For each leaf j and feature subset S, stores |D_S| / n_background.
     /// This avoids per-evaluation divisions in the hot path.
     pub leaf_probs: FxHashMap<usize, LeafProbabilities>,
+    /// Expected value of the tree: E[f(X)] = sum over all leaves of (leaf_value * prob_∅).
+    ///
+    /// This is the constant/intercept term in the functional decomposition (f_∅).
+    pub expected_value: f32,
 }
 
 impl<T: TreeModel> AugmentedTree<T> {
@@ -58,13 +62,29 @@ impl<T: TreeModel> AugmentedTree<T> {
     ) -> Self {
         // Precompute probabilities for all leaves
         let mut leaf_probs = FxHashMap::default();
+        let empty_subset = FeatureSubset::empty();
+        let mut expected_value = 0.0;
+
         for (leaf_id, data) in &path_data {
             let mut probs = LeafProbabilities::default();
+            let mut prob_empty = None;
+
             for (subset, obs_set) in data {
                 let p = obs_set.len() as f32 / n_background as f32;
                 probs.insert(subset.clone(), p);
+                if subset == &empty_subset {
+                    prob_empty = Some(p);
+                }
             }
             leaf_probs.insert(*leaf_id, probs);
+
+            // Compute expected value contribution from this leaf
+            // E[f(X)] = sum over leaves of (leaf_value * prob_∅)
+            if let Some(prob) = prob_empty {
+                if let Some(leaf_val) = tree.leaf_value(*leaf_id) {
+                    expected_value += leaf_val * prob;
+                }
+            }
         }
 
         Self {
@@ -74,6 +94,7 @@ impl<T: TreeModel> AugmentedTree<T> {
             n_background,
             all_tree_features,
             leaf_probs,
+            expected_value,
         }
     }
 
