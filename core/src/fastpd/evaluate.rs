@@ -1,4 +1,6 @@
-use ndarray::ArrayView1;
+use ndarray::{Array1, Array2, ArrayView2};
+use rayon::prelude::*;
+use rayon::ThreadPool;
 
 use crate::fastpd::error::FastPDError;
 use crate::fastpd::parallel::{Joiner, RayonJoin, SeqJoin};
@@ -6,148 +8,176 @@ use crate::fastpd::tree::TreeModel;
 use crate::fastpd::types::FeatureSubset;
 
 use super::augmented_tree::AugmentedTree;
-use super::cache::PDCache;
 
-/// Evaluates the partial dependence function v_S(x_S) sequentially.
+/// Evaluates v_U(x_U) for multiple subsets U and multiple evaluation points sequentially.
 ///
-/// This is a thin wrapper around `evaluate_recursive::<T, SeqJoin>`.
-pub fn evaluate_pd_function_seq<T: TreeModel>(
+/// This is a thin wrapper around `evaluate_pd_batch_for_subsets_impl::<T, SeqJoin>`.
+pub fn evaluate_pd_batch_for_subsets_seq<T: TreeModel>(
     augmented_tree: &AugmentedTree<T>,
-    evaluation_point: &ArrayView1<f32>,
-    feature_subset: &FeatureSubset,
-    cache: &mut PDCache,
-) -> Result<f32, FastPDError> {
-    evaluate_pd_function_impl::<T, SeqJoin>(augmented_tree, evaluation_point, feature_subset, cache)
+    evaluation_points: &ArrayView2<f32>,
+    subsets_u: &[FeatureSubset],
+) -> Result<Array2<f32>, FastPDError> {
+    evaluate_pd_batch_for_subsets_impl::<T, SeqJoin>(augmented_tree, evaluation_points, subsets_u)
 }
 
-/// Evaluates the partial dependence function v_S(x_S) in parallel.
+/// Evaluates v_U(x_U) for multiple subsets U and multiple evaluation points in parallel.
 ///
-/// This is a thin wrapper around `evaluate_recursive::<T, RayonJoin>`.
+/// This is a thin wrapper around `evaluate_pd_batch_for_subsets_impl::<T, RayonJoin>`.
 /// **Important**: This function must be called from within a Rayon thread pool
 /// (via `ThreadPool::install()`) for proper parallel execution.
-pub fn evaluate_pd_function_rayon<T: TreeModel>(
+pub fn evaluate_pd_batch_for_subsets_rayon<T: TreeModel>(
     augmented_tree: &AugmentedTree<T>,
-    evaluation_point: &ArrayView1<f32>,
-    feature_subset: &FeatureSubset,
-    cache: &mut PDCache,
-) -> Result<f32, FastPDError> {
-    evaluate_pd_function_impl::<T, RayonJoin>(
-        augmented_tree,
-        evaluation_point,
-        feature_subset,
-        cache,
-    )
+    evaluation_points: &ArrayView2<f32>,
+    subsets_u: &[FeatureSubset],
+) -> Result<Array2<f32>, FastPDError> {
+    evaluate_pd_batch_for_subsets_impl::<T, RayonJoin>(augmented_tree, evaluation_points, subsets_u)
 }
 
-/// Legacy function: delegates to `evaluate_pd_function_seq` for backward compatibility.
-pub fn evaluate_pd_function<T: TreeModel>(
+/// Legacy function: delegates to `evaluate_pd_batch_for_subsets_seq` for backward compatibility.
+pub fn evaluate_pd_batch_for_subsets<T: TreeModel>(
     augmented_tree: &AugmentedTree<T>,
-    evaluation_point: &ArrayView1<f32>,
-    feature_subset: &FeatureSubset,
-    cache: &mut PDCache,
-) -> Result<f32, FastPDError> {
-    evaluate_pd_function_seq(augmented_tree, evaluation_point, feature_subset, cache)
+    evaluation_points: &ArrayView2<f32>,
+    subsets_u: &[FeatureSubset],
+) -> Result<Array2<f32>, FastPDError> {
+    evaluate_pd_batch_for_subsets_seq(augmented_tree, evaluation_points, subsets_u)
 }
 
-/// Internal implementation of PD evaluation using the Joiner trait.
-fn evaluate_pd_function_impl<T, J>(
+/// Internal implementation of batch evaluation using the Joiner trait.
+///
+/// This function implements the Rcpp `recurseMarginalizeSBitmask` pattern,
+/// evaluating all evaluation points and all feature subsets in a single tree traversal.
+fn evaluate_pd_batch_for_subsets_impl<T, J>(
     augmented_tree: &AugmentedTree<T>,
-    evaluation_point: &ArrayView1<f32>,
-    feature_subset: &FeatureSubset,
-    cache: &mut PDCache,
-) -> Result<f32, FastPDError>
+    evaluation_points: &ArrayView2<f32>,
+    subsets_u: &[FeatureSubset],
+) -> Result<Array2<f32>, FastPDError>
 where
     T: TreeModel,
     J: Joiner,
 {
-    // Note: We validate the evaluation point dimension during tree traversal
-    // when we check if feature indices are within bounds
+    let n_eval = evaluation_points.nrows();
+    let n_subsets = subsets_u.len();
+    let mut out = Array2::<f32>::zeros((n_eval, n_subsets));
 
-    // Use provided FeatureSubset directly; callers are responsible for constructing it
-    let subset_s = feature_subset;
+    // Find empty subset index (if present) to set it directly to expected value
+    let empty_subset = FeatureSubset::empty();
+    let empty_idx = subsets_u.iter().position(|u| u == &empty_subset);
 
-    // Check cache first for S
-    if let Some(cached) = cache.get(evaluation_point, subset_s) {
-        return Ok(cached);
-    }
-
-    // Compute U = S ∩ (union of all T_j) using the precomputed union of
-    // path features stored in the augmented tree.
-    let u = subset_s.intersect_with(&augmented_tree.all_tree_features);
-
-    // Check cache for U (different S may map to same U)
-    if let Some(cached) = cache.get(evaluation_point, &u) {
-        // Cache the result for S as well
-        cache.insert(evaluation_point, subset_s.clone(), cached);
-        return Ok(cached);
-    }
-
-    // Traverse tree to compute v_U(x_U)
-    let tree = &augmented_tree.tree;
-    // Scratch subset reused across recursive calls to avoid per-leaf allocations
-    let mut scratch_subset = FeatureSubset::empty();
-    let value = evaluate_recursive::<T, J>(
-        tree,
-        tree.root(),
-        evaluation_point,
-        &u,
+    evaluate_batch_recursive::<T, J>(
         augmented_tree,
-        &mut scratch_subset,
+        augmented_tree.tree.root(),
+        evaluation_points,
+        subsets_u,
+        &mut out,
     )?;
 
-    // Cache result for both U and S
-    cache.insert(evaluation_point, u, value);
-    cache.insert(evaluation_point, subset_s.clone(), value);
+    // Set empty subset column directly to expected value (constant across all evaluation points)
+    if let Some(idx) = empty_idx {
+        let mut empty_col = out.column_mut(idx);
+        empty_col.fill(augmented_tree.expected_value);
+    }
 
-    Ok(value)
+    Ok(out)
 }
 
-/// Recursive helper function for tree evaluation (implements function G from Algorithm 2).
+/// Aggregates v_U(x) across multiple augmented trees.
 ///
-/// This function traverses the tree and computes the partial dependence contribution
-/// at each node, summing contributions from leaves where x_U would land.
-fn evaluate_recursive<T, J>(
-    tree: &T,
-    node_id: usize,
-    point: &ArrayView1<f32>,
-    feature_subset: &FeatureSubset,
+/// This is a pure function that computes the sum of v_U(x) contributions
+/// from all trees in the ensemble. It handles both sequential and parallel
+/// execution based on the provided `ParallelSettings`.
+///
+/// # Arguments
+/// * `augmented_trees` - Slice of augmented trees to aggregate
+/// * `evaluation_points` - Evaluation points, shape: [n_eval, n_features]
+/// * `subsets_u` - Vector of feature subsets U to evaluate
+/// * `parallel` - Parallelization settings
+/// * `thread_pool` - Optional thread pool to reuse (if None, creates a new one for parallel execution)
+///
+/// # Returns
+/// Matrix of shape [n_eval, n_subsets] containing aggregated v_U(x) values
+///
+/// # Errors
+/// Returns `FastPDError` if evaluation fails
+pub fn aggregate_v_u_across_trees<T: TreeModel>(
+    augmented_trees: &[AugmentedTree<T>],
+    evaluation_points: &ArrayView2<f32>,
+    subsets_u: &[FeatureSubset],
+    thread_pool: Option<&ThreadPool>,
+) -> Result<Array2<f32>, FastPDError> {
+    let n_eval = evaluation_points.nrows();
+    let n_subsets_u = subsets_u.len();
+
+    if let Some(pool) = thread_pool {
+        // Use provided thread pool
+        pool.install(|| {
+            augmented_trees
+                .par_iter()
+                .map(|aug_tree| {
+                    evaluate_pd_batch_for_subsets_rayon(aug_tree, evaluation_points, subsets_u)
+                })
+                .try_reduce(
+                    || Array2::<f32>::zeros((n_eval, n_subsets_u)),
+                    |mut a, b| {
+                        a = &a + &b;
+                        Ok(a)
+                    },
+                )
+        })
+    } else {
+        // Sequential path: no Rayon anywhere
+        let mut mat_u = Array2::<f32>::zeros((n_eval, n_subsets_u));
+        for aug_tree in augmented_trees {
+            let tree_mat =
+                evaluate_pd_batch_for_subsets_seq(aug_tree, evaluation_points, subsets_u)?;
+            mat_u = &mat_u + &tree_mat;
+        }
+        Ok(mat_u)
+    }
+}
+
+/// Recursive helper function for batch evaluation.
+///
+/// This function mirrors the Rcpp `recurseMarginalizeSBitmask` implementation,
+/// processing all evaluation points and all subsets in a single traversal.
+fn evaluate_batch_recursive<T, J>(
     augmented_tree: &AugmentedTree<T>,
-    scratch_subset: &mut FeatureSubset,
-) -> Result<f32, FastPDError>
+    node_id: usize,
+    evaluation_points: &ArrayView2<f32>,
+    subsets_u: &[FeatureSubset],
+    out: &mut Array2<f32>,
+) -> Result<(), FastPDError>
 where
     T: TreeModel,
     J: Joiner,
 {
+    let tree = &augmented_tree.tree;
+
     if tree.is_leaf(node_id) {
-        // Get U_j = U ∩ T_j
         let path_features = augmented_tree
             .path_features
             .get(&node_id)
             .ok_or_else(|| FastPDError::InvalidTree("Leaf missing path features".into()))?;
-        // Compute U_j into a reusable scratch subset to avoid per-leaf allocations
-        feature_subset.intersect_with_into(path_features, scratch_subset);
 
-        // Get D_{U_j} from P_j
-        let path_data = augmented_tree
-            .path_data
-            .get(&node_id)
-            .ok_or_else(|| FastPDError::InvalidTree("Leaf missing path data".into()))?;
-        let shared_obs_set = path_data
-            .get(scratch_subset)
-            .ok_or(FastPDError::MissingObservationSet)?;
+        let n_eval = evaluation_points.nrows();
+        let mut scratch_subset = FeatureSubset::empty();
 
-        // Compute empirical probability: |D_{U_j}| / n_b
-        let prob = shared_obs_set.len() as f32 / augmented_tree.n_background as f32;
+        for (j, u) in subsets_u.iter().enumerate() {
+            // U_j = U ∩ T_j
+            u.intersect_with_into(path_features, &mut scratch_subset);
 
-        // Get leaf value
-        let leaf_value = tree
-            .leaf_value(node_id)
-            .ok_or_else(|| FastPDError::InvalidTree("Leaf missing value".into()))?;
+            let expectation = augmented_tree
+                .precomputed_expectation(node_id, &scratch_subset)
+                .ok_or(FastPDError::MissingObservationSet)?;
 
-        return Ok(leaf_value * prob);
+            let mut col = out.column_mut(j);
+            for i in 0..n_eval {
+                col[i] += expectation;
+            }
+        }
+        return Ok(());
     }
 
-    // Get node information
+    // Internal node: recurse on children, then merge
     let feature = tree
         .node_feature(node_id)
         .ok_or_else(|| FastPDError::InvalidTree("Internal node missing feature".into()))?;
@@ -161,67 +191,142 @@ where
         .right_child(node_id)
         .ok_or_else(|| FastPDError::InvalidTree("Missing right child".into()))?;
 
-    // Validate feature index
-    if feature >= point.len() {
-        return Err(FastPDError::InvalidFeature(feature, point.len()));
+    if feature >= evaluation_points.ncols() {
+        return Err(FastPDError::InvalidFeature(
+            feature,
+            evaluation_points.ncols(),
+        ));
     }
 
-    if feature_subset.contains(feature) {
-        // d_j ∈ U: follow path based on x[d_j]
-        let feature_value = point[feature];
-        let go_left = if T::COMPARISON {
-            feature_value < threshold
-        } else {
-            feature_value <= threshold
-        };
-        if go_left {
-            evaluate_recursive::<T, J>(
-                tree,
+    let n_eval = evaluation_points.nrows();
+    let n_subsets = subsets_u.len();
+    let mut mat_yes = Array2::<f32>::zeros((n_eval, n_subsets));
+    let mut mat_no = Array2::<f32>::zeros((n_eval, n_subsets));
+
+    // Use Joiner trait to parallelize recursive calls to both children
+    // The child evaluations are independent; only the combination logic differs afterward
+    let (left_result, right_result) = J::join(
+        || {
+            evaluate_batch_recursive::<T, J>(
+                augmented_tree,
                 left_child,
-                point,
-                feature_subset,
-                augmented_tree,
-                scratch_subset,
+                evaluation_points,
+                subsets_u,
+                &mut mat_yes,
             )
-        } else {
-            evaluate_recursive::<T, J>(
-                tree,
+        },
+        || {
+            evaluate_batch_recursive::<T, J>(
+                augmented_tree,
                 right_child,
-                point,
-                feature_subset,
-                augmented_tree,
-                scratch_subset,
+                evaluation_points,
+                subsets_u,
+                &mut mat_no,
             )
+        },
+    );
+    left_result?;
+    right_result?;
+
+    let feature_col = evaluation_points.column(feature);
+    for (j, u) in subsets_u.iter().enumerate() {
+        let feature_in_u = u.contains(feature);
+        let col_yes = mat_yes.column(j);
+        let col_no = mat_no.column(j);
+        let mut col_out = out.column_mut(j);
+
+        if !feature_in_u {
+            for i in 0..n_eval {
+                col_out[i] += col_yes[i] + col_no[i];
+            }
+        } else if T::COMPARISON {
+            for i in 0..n_eval {
+                col_out[i] += if feature_col[i] < threshold {
+                    col_yes[i]
+                } else {
+                    col_no[i]
+                };
+            }
+        } else {
+            for i in 0..n_eval {
+                col_out[i] += if feature_col[i] <= threshold {
+                    col_yes[i]
+                } else {
+                    col_no[i]
+                };
+            }
         }
-    } else {
-        // d_j ∉ U: sum contributions from both children using Joiner trait
-        // Note: We need separate scratch subsets for left and right to avoid conflicts
-        let mut scratch_left = FeatureSubset::empty();
-        let mut scratch_right = FeatureSubset::empty();
-        let (left_val, right_val) = J::join(
-            || {
-                evaluate_recursive::<T, J>(
-                    tree,
-                    left_child,
-                    point,
-                    feature_subset,
-                    augmented_tree,
-                    &mut scratch_left,
-                )
-            },
-            || {
-                evaluate_recursive::<T, J>(
-                    tree,
-                    right_child,
-                    point,
-                    feature_subset,
-                    augmented_tree,
-                    &mut scratch_right,
-                )
-            },
-        );
-        Ok(left_val? + right_val?)
     }
+
+    Ok(())
+}
+
+/// Given v_U(x) = E[m(X) | X_U = x_U] for all U in `subsets_u`,
+/// extract the plain partial dependence surface v_S(x_S) by
+/// selecting the column corresponding to U = S (when present).
+///
+/// # Arguments
+/// * `mat_u` - Matrix of shape [n_eval, n_subsets_u] containing v_U(x) values
+/// * `subsets_u` - Vector of feature subsets U corresponding to columns
+/// * `s` - Target feature subset S
+///
+/// # Returns
+/// Vector of v_S(x_S) values, or None if S is not in subsets_u
+pub fn pd_from_u_matrix(
+    mat_u: &Array2<f32>,
+    subsets_u: &[FeatureSubset],
+    s: &FeatureSubset,
+) -> Option<Array1<f32>> {
+    subsets_u
+        .iter()
+        .position(|u| u == s)
+        .map(|idx| mat_u.column(idx).to_owned())
+}
+
+/// Given v_U(x) = E[m(X) | X_U = x_U] for all U in `subsets_u`,
+/// compute the functional component f_S(x_S) for a single target
+/// subset S via inclusion–exclusion, as in the GLEX ANOVA decomposition:
+///
+///   f_S(x_S) = sum_{V ⊆ S} (-1)^{|S|-|V|} E[m(X) | X_V = x_V]
+///
+/// # Arguments
+/// * `mat_u` - Matrix of shape [n_eval, n_subsets_u] containing v_U(x) values
+/// * `subsets_u` - Vector of feature subsets U corresponding to columns
+/// * `s` - Target feature subset S
+///
+/// # Returns
+/// Vector of f_S(x_S) values
+pub fn functional_component_from_u_matrix(
+    mat_u: &Array2<f32>,
+    subsets_u: &[FeatureSubset],
+    s: &FeatureSubset,
+) -> Array1<f32> {
+    let n_eval = mat_u.nrows();
+    let mut result = Array1::<f32>::zeros(n_eval);
+
+    // Build lookup map for efficiency (avoids O(|U|) search per V)
+    let u_to_idx: rustc_hash::FxHashMap<FeatureSubset, usize> = subsets_u
+        .iter()
+        .enumerate()
+        .map(|(i, u)| (u.clone(), i))
+        .collect();
+
+    // Enumerate all V ⊆ S and combine v_V(x) with ±1 coefficients
+    for v in s.all_subsets() {
+        if let Some(&idx) = u_to_idx.get(&v) {
+            let sign = if (s.len() - v.len()).is_multiple_of(2) {
+                1.0
+            } else {
+                -1.0
+            };
+            let col_v = mat_u.column(idx);
+            for i in 0..n_eval {
+                result[i] += sign * col_v[i];
+            }
+        }
+    }
+
+    result
 }
 
 #[cfg(test)]
@@ -229,7 +334,6 @@ mod tests {
     use super::*;
     use crate::fastpd::augment::augment_tree;
     use crate::fastpd::tree::{Tree, TreeNode};
-    use ndarray::arr1;
 
     // Helper: Create a simple 2-level tree for testing
     fn create_simple_tree() -> Tree {
@@ -280,29 +384,15 @@ mod tests {
         // Augment the tree
         let aug_tree = augment_tree(tree, &background_view).unwrap();
 
-        // Evaluate PD for S = {0} at point x = [0.3]
-        // Since 0.3 <= 0.5, we go to left child (leaf 1)
-        // U = {0} ∩ {0} = {0}
-        // At leaf 1, U_j = {0} ∩ {0} = {0}
-        // We use D_{{0}} from P_1, which contains all 4 samples (when feature 0 is in S, all samples go to both children)
-        // So prob = 4/4 = 1.0
-        // Value = 1.0 * 1.0 = 1.0
-        let mut cache = PDCache::new();
-        let point = arr1(&[0.3]);
+        // Evaluate PD for S = {0} at points [0.3] and [0.7]
+        // Since 0.3 <= 0.5, we go to left child (leaf 1) -> value = 1.0
+        // Since 0.7 > 0.5, we go to right child (leaf 2) -> value = 2.0
+        let points = ndarray::arr2(&[[0.3], [0.7]]);
         let subset = FeatureSubset::from_slice(&[0]);
-        let value = evaluate_pd_function(&aug_tree, &point.view(), &subset, &mut cache).unwrap();
-        assert!((value - 1.0).abs() < 1e-10);
-
-        // Evaluate PD for S = {0} at point x = [0.7]
-        // Since 0.7 > 0.5, we go to right child (leaf 2)
-        // U = {0} ∩ {0} = {0}
-        // At leaf 2, U_j = {0} ∩ {0} = {0}
-        // We use D_{{0}} from P_2, which contains all 4 samples
-        // So prob = 4/4 = 1.0
-        // Value = 2.0 * 1.0 = 2.0
-        let point2 = arr1(&[0.7]);
-        let value2 = evaluate_pd_function(&aug_tree, &point2.view(), &subset, &mut cache).unwrap();
-        assert!((value2 - 2.0).abs() < 1e-10);
+        let subsets_u = vec![subset];
+        let mat = evaluate_pd_batch_for_subsets_seq(&aug_tree, &points.view(), &subsets_u).unwrap();
+        assert!((mat[[0, 0]] - 1.0).abs() < 1e-10);
+        assert!((mat[[1, 0]] - 2.0).abs() < 1e-10);
     }
 
     #[test]
@@ -317,42 +407,11 @@ mod tests {
         // Leaf 1: 1.0 * (2/4) = 0.5
         // Leaf 2: 2.0 * (2/4) = 1.0
         // Total: 1.5
-        let mut cache = PDCache::new();
-        let point = arr1(&[0.5]);
+        let point = ndarray::arr2(&[[0.5]]);
         let subset = FeatureSubset::empty();
-        let value = evaluate_pd_function(&aug_tree, &point.view(), &subset, &mut cache).unwrap();
-        assert!((value - 1.5).abs() < 1e-10);
-    }
-
-    #[test]
-    fn test_evaluate_pd_caching() {
-        let tree = create_simple_tree();
-        let background = ndarray::arr2(&[[0.3], [0.7], [0.2], [0.8]]);
-        let background_view = background.view();
-        let aug_tree = augment_tree(tree, &background_view).unwrap();
-
-        let mut cache = PDCache::new();
-        let point = arr1(&[0.3]);
-
-        // First evaluation
-        let subset1 = FeatureSubset::from_slice(&[0]);
-        let value1 = evaluate_pd_function(&aug_tree, &point.view(), &subset1, &mut cache).unwrap();
-        // When S = {0}, U = {0} ∩ {0} = {0}, so U = S
-        // We cache for both U and S, but they're the same key, so cache has 1 entry
-        assert!(!cache.is_empty());
-
-        // Second evaluation with same S should use cache
-        let value2 = evaluate_pd_function(&aug_tree, &point.view(), &subset1, &mut cache).unwrap();
-        assert_eq!(value1, value2);
-
-        // Test with different S that maps to same U
-        // S = {0, 99} where 99 is not in tree, so U = {0} ∩ {0} = {0}
-        let subset2 = FeatureSubset::from_slice(&[0, 99]);
-        let value3 = evaluate_pd_function(&aug_tree, &point.view(), &subset2, &mut cache).unwrap();
-        // Should use cached value for U = {0}
-        assert_eq!(value1, value3);
-        // Cache should now have 2 entries: one for {0} and one for {0, 99}
-        assert!(cache.len() >= 2);
+        let subsets_u = vec![subset];
+        let mat = evaluate_pd_batch_for_subsets_seq(&aug_tree, &point.view(), &subsets_u).unwrap();
+        assert!((mat[[0, 0]] - 1.5).abs() < 1e-10);
     }
 
     #[test]
@@ -383,19 +442,21 @@ mod tests {
 
         // Test case 1: S = {0}, x = [0.3, 0.0] (x_1 doesn't matter for S={0})
         // Empirical PD: (1/10) * sum_{i=1}^{10} m([0.3, X^{(i)}_1])
-        let evaluation_point = arr1(&[0.3, 0.0]);
+        let evaluation_point = ndarray::arr2(&[[0.3, 0.0]]);
         let subset = FeatureSubset::from_slice(&[0]);
+        let subsets_u = vec![subset.clone()];
 
         // Compute FastPD estimate
-        let mut cache = PDCache::new();
-        let fastpd_value =
-            evaluate_pd_function(&aug_tree, &evaluation_point.view(), &subset, &mut cache).unwrap();
+        let mat =
+            evaluate_pd_batch_for_subsets_seq(&aug_tree, &evaluation_point.view(), &subsets_u)
+                .unwrap();
+        let fastpd_value = mat[[0, 0]];
 
         // Compute empirical PD manually
         let mut empirical_sum = 0.0;
         for i in 0..n_b {
             // Create synthetic sample: [x_0, X^{(i)}_1]
-            let synthetic = [evaluation_point[0], background[[i, 1]]];
+            let synthetic = [evaluation_point[[0, 0]], background[[i, 1]]];
             // Traverse tree to get prediction
             let prediction = tree.predict(&synthetic);
             empirical_sum += prediction;
@@ -412,12 +473,14 @@ mod tests {
 
         // Test case 2: S = {} (empty subset), x = [0.5, 0.0]
         // Empirical PD: (1/10) * sum_{i=1}^{10} m([X^{(i)}_0, X^{(i)}_1]) = average of all predictions
-        let evaluation_point2 = arr1(&[0.5, 0.0]);
+        let evaluation_point2 = ndarray::arr2(&[[0.5, 0.0]]);
         let subset2 = FeatureSubset::empty();
+        let subsets_u2 = vec![subset2.clone()];
 
-        let fastpd_value2 =
-            evaluate_pd_function(&aug_tree, &evaluation_point2.view(), &subset2, &mut cache)
+        let mat2 =
+            evaluate_pd_batch_for_subsets_seq(&aug_tree, &evaluation_point2.view(), &subsets_u2)
                 .unwrap();
+        let fastpd_value2 = mat2[[0, 0]];
 
         let mut empirical_sum2 = 0.0;
         for i in 0..n_b {

@@ -4,7 +4,7 @@
 mod xgboost;
 
 use glex_core::fastpd::parallel::ParallelSettings;
-use numpy::{PyArray1, PyReadonlyArray2};
+use numpy::{PyArray1, PyArray2, PyReadonlyArray2};
 use pyo3::prelude::*;
 use pyo3::types::PyType;
 
@@ -133,14 +133,6 @@ impl FastPDPy {
         Ok(PyArray1::from_owned_array(py, result))
     }
 
-    /// Clear all PD caches.
-    ///
-    /// This is useful when memory is a concern or when you want to ensure
-    /// fresh computations for a new batch of evaluations.
-    fn clear_caches(&mut self) {
-        self.fastpd.clear_caches();
-    }
-
     /// Returns the number of trees in the ensemble.
     fn num_trees(&self) -> usize {
         self.fastpd.num_trees()
@@ -154,6 +146,89 @@ impl FastPDPy {
     /// Returns the number of features.
     fn n_features(&self) -> usize {
         self.fastpd.n_features()
+    }
+
+    /// Compute plain partial dependence surfaces v_S(x_S)
+    /// for all subsets S with 1 <= |S| <= max_order.
+    ///
+    /// This function efficiently computes all PD surfaces up to a given order
+    /// by batch-evaluating all subsets in a single pass through each tree.
+    ///
+    /// # Arguments
+    /// * `evaluation_points` - Points at which to evaluate PD
+    ///     shape: (n_evaluation_points, n_features)
+    /// * `max_order` - Maximum interaction order (e.g., 1 for main effects, 2 for pairwise, etc.)
+    ///
+    /// # Returns
+    /// A tuple `(pd_values, subsets)` where:
+    /// - `pd_values`: 2D numpy array of shape (n_eval, n_subsets) with one column per subset S
+    /// - `subsets`: List of lists, where each inner list contains the feature indices for a subset
+    fn pd_functions_up_to_order<'a>(
+        &mut self,
+        py: Python<'a>,
+        evaluation_points: PyReadonlyArray2<f64>,
+        max_order: usize,
+    ) -> PyResult<(Bound<'a, PyArray2<f32>>, Vec<Vec<usize>>)> {
+        // Convert f64 array to f32 array
+        let eval_f64 = evaluation_points.as_array();
+        let eval_f32: ndarray::Array2<f32> = eval_f64.mapv(|x| x as f32);
+
+        let (pd_values, subsets) = self
+            .fastpd
+            .pd_functions_up_to_order(&eval_f32.view(), max_order)
+            .map_err(|e| {
+                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("FastPD error: {}", e))
+            })?;
+
+        // Convert FeatureSubset vector to Vec<Vec<usize>>
+        let subsets_py: Vec<Vec<usize>> = subsets
+            .into_iter()
+            .map(|subset| subset.as_slice())
+            .collect();
+
+        Ok((PyArray2::from_owned_array(py, pd_values), subsets_py))
+    }
+
+    /// Compute functional decomposition components f_S(x_S)
+    /// for all subsets S with 1 <= |S| <= max_order.
+    ///
+    /// This function computes the ANOVA functional decomposition components
+    /// via inclusion–exclusion, sharing the same intermediate v_U(x) computation
+    /// as `pd_functions_up_to_order`.
+    ///
+    /// # Arguments
+    /// * `evaluation_points` - Points at which to evaluate
+    ///     shape: (n_evaluation_points, n_features)
+    /// * `max_order` - Maximum interaction order
+    ///
+    /// # Returns
+    /// A tuple `(comp_values, subsets)` where:
+    /// - `comp_values`: 2D numpy array of shape (n_eval, n_subsets) with one column per component f_S
+    /// - `subsets`: List of lists, where each inner list contains the feature indices for a subset
+    fn functional_decomp_up_to_order<'a>(
+        &mut self,
+        py: Python<'a>,
+        evaluation_points: PyReadonlyArray2<f64>,
+        max_order: usize,
+    ) -> PyResult<(Bound<'a, PyArray2<f32>>, Vec<Vec<usize>>)> {
+        // Convert f64 array to f32 array
+        let eval_f64 = evaluation_points.as_array();
+        let eval_f32: ndarray::Array2<f32> = eval_f64.mapv(|x| x as f32);
+
+        let (comp_values, subsets) = self
+            .fastpd
+            .functional_decomp_up_to_order(&eval_f32.view(), max_order)
+            .map_err(|e| {
+                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("FastPD error: {}", e))
+            })?;
+
+        // Convert FeatureSubset vector to Vec<Vec<usize>>
+        let subsets_py: Vec<Vec<usize>> = subsets
+            .into_iter()
+            .map(|subset| subset.as_slice())
+            .collect();
+
+        Ok((PyArray2::from_owned_array(py, comp_values), subsets_py))
     }
 }
 

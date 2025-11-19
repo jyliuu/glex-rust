@@ -1,7 +1,7 @@
 use rustc_hash::FxHashMap;
 
 use crate::fastpd::tree::TreeModel;
-use crate::fastpd::types::{FeatureSubset, PathData};
+use crate::fastpd::types::{FeatureSubset, LeafExpectations, PathData};
 
 /// Augmented tree storing path features and path data for each leaf.
 ///
@@ -33,6 +33,15 @@ pub struct AugmentedTree<T: TreeModel> {
     /// v_S(x_S) does not need to recompute the union of all path features
     /// for every query.
     pub all_tree_features: FeatureSubset,
+    /// Precomputed expectations for each leaf: leaf_id -> (FeatureSubset -> expectation).
+    ///
+    /// For each leaf j and feature subset S, stores leaf_value * (|D_S| / n_background).
+    /// This avoids per-evaluation multiplications in the hot path.
+    pub leaf_expectations: FxHashMap<usize, LeafExpectations>,
+    /// Expected value of the tree: E[f(X)] = sum over all leaves of (leaf_value * prob_∅).
+    ///
+    /// This is the constant/intercept term in the functional decomposition (f_∅).
+    pub expected_value: f32,
 }
 
 impl<T: TreeModel> AugmentedTree<T> {
@@ -51,13 +60,56 @@ impl<T: TreeModel> AugmentedTree<T> {
         path_data: FxHashMap<usize, PathData>,
         all_tree_features: FeatureSubset,
     ) -> Self {
+        // Precompute expectations for all leaves
+        let mut leaf_expectations = FxHashMap::default();
+        let empty_subset = FeatureSubset::empty();
+        let mut expected_value = 0.0;
+
+        for (leaf_id, data) in &path_data {
+            let leaf_val = tree.leaf_value(*leaf_id).unwrap_or(0.0);
+            let mut expectations = LeafExpectations::default();
+            let mut expectation_empty = None;
+
+            for (subset, obs_set) in data {
+                let prob = obs_set.len() as f32 / n_background as f32;
+                let expectation = leaf_val * prob;
+                expectations.insert(subset.clone(), expectation);
+                if subset == &empty_subset {
+                    expectation_empty = Some(expectation);
+                }
+            }
+            leaf_expectations.insert(*leaf_id, expectations);
+
+            // Compute expected value contribution from this leaf
+            // E[f(X)] = sum over leaves of (leaf_value * prob_∅)
+            if let Some(exp) = expectation_empty {
+                expected_value += exp;
+            }
+        }
+
         Self {
             tree,
             path_features,
             path_data,
             n_background,
             all_tree_features,
+            leaf_expectations,
+            expected_value,
         }
+    }
+
+    /// Gets the precomputed expectation for a given leaf and feature subset.
+    ///
+    /// # Arguments
+    /// * `leaf_id` - The leaf node ID
+    /// * `subset` - The feature subset S
+    ///
+    /// # Returns
+    /// The precomputed expectation (leaf_value * |D_S| / n_background), or `None` if not found.
+    pub fn precomputed_expectation(&self, leaf_id: usize, subset: &FeatureSubset) -> Option<f32> {
+        self.leaf_expectations
+            .get(&leaf_id)
+            .and_then(|m| m.get(subset).copied())
     }
 
     /// Returns the number of leaves in the augmented tree.
@@ -152,6 +204,7 @@ mod tests {
 
         assert_eq!(aug_tree.n_background, 100);
         assert_eq!(aug_tree.num_leaves(), 0);
+        assert!(aug_tree.leaf_expectations.is_empty());
     }
 
     #[test]
