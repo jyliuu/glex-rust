@@ -311,6 +311,26 @@ impl FastPDPy {
         }
     }
 
+    /// Set cached components.
+    ///
+    /// # Arguments
+    /// * `comp_values` - Component values array
+    /// * `subsets` - Feature subsets vector
+    /// * `eval_points` - Evaluation points used
+    /// * `max_order` - Maximum order of cached components
+    fn set_cached_components(
+        &mut self,
+        comp_values: PyReadonlyArray2<f32>,
+        subsets: Vec<Vec<usize>>,
+        eval_points: PyReadonlyArray2<f32>,
+        max_order: usize,
+    ) {
+        self.cached_comp_values = Some(comp_values.as_array().to_owned());
+        self.cached_subsets = Some(subsets);
+        self.cached_eval_points = Some(eval_points.as_array().to_owned());
+        self.cached_max_order = Some(max_order);
+    }
+
     /// Extract component by subset from cache.
     ///
     /// # Arguments
