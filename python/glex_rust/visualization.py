@@ -249,7 +249,7 @@ def plot_1d_components(
         sort_idx = np.argsort(eval_pts)
         ax.plot(eval_pts[sort_idx], comp_vals[sort_idx], **kwargs)
         ax.set_xlabel(feat_name)
-        ax.set_title(f"$f_{{{feat_name}}}$")
+        ax.set_title(f"$\\hat{{f}}_{{{feat_name}}}$")
         ax.grid(True, alpha=0.3)
         ax.axhline(y=0, color="k", linestyle="--", linewidth=0.5, alpha=0.5)
 
@@ -376,7 +376,7 @@ def plot_2d_interactions(
         )
         ax.set_xlabel(feat_name1)
         ax.set_ylabel(feat_name2)
-        ax.set_title(f"$f_{{{feat_name1},{feat_name2}}}$")
+        ax.set_title(f"$\\hat{{f}}_{{{feat_name1},{feat_name2}}}$")
 
         # Add colorbar with clear ticks (using actual data range for ticks)
         cbar = plt.colorbar(scatter, ax=ax)
